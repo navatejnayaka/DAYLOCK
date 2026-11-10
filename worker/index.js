@@ -79,7 +79,7 @@ function validateTasks(value) {
   return value.map((task, index) => {
     if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error(`Task ${index + 1} is invalid.`);
     const { id, title, category, start, end, status, note } = task;
-    if (typeof id !== "string" || id.length < 1 || id.length > 80) throw new Error(`Task ${index + 1} has an invalid ID.`);
+    if (!((typeof id === "string" && id.length >= 1 && id.length <= 80) || (typeof id === "number" && Number.isSafeInteger(id)))) throw new Error(`Task ${index + 1} has an invalid ID.`);
     if (typeof title !== "string" || title.trim().length < 1 || title.length > 100) throw new Error(`Task ${index + 1} needs a title up to 100 characters.`);
     if (typeof category !== "string" || category.length > 40) throw new Error(`Task ${index + 1} has an invalid category.`);
     if (typeof start !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(start)) throw new Error(`Task ${index + 1} has an invalid start time.`);
