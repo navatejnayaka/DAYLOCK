@@ -10,7 +10,7 @@ import {
   updateProfile,
 } from 'firebase/auth'
 import { auth, authPersistenceReady } from './firebase'
-import { collection, doc, getDoc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore'
+import { collection, doc, getDoc, getDocs, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore'
 import { db } from './firebase'
 import {
   ArrowRight, ArrowUpRight, BarChart3, BookOpen, CalendarDays, Check,
@@ -23,7 +23,24 @@ import './styles.css'
 type Screen = 'home' | 'day' | 'growth' | 'squad' | 'insights'
 type AuthMode = 'login' | 'signup' | 'reset'
 type TaskStatus = 'Not started' | 'In progress' | 'Completed' | 'Skipped'
-type Task = { id: number; title: string; category: string; start: string; end: string; status: TaskStatus; note?: string }
+type Task = { id: number | string; title: string; category: string; start: string; end: string; status: TaskStatus; note?: string }
+
+function localDateKey(offsetDays: number) {
+  const date = new Date()
+  date.setDate(date.getDate() + offsetDays)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function normalizeTasks(value: unknown): Task[] {
+  if (!Array.isArray(value)) return []
+  const statuses: TaskStatus[] = ['Not started', 'In progress', 'Completed', 'Skipped']
+  return value.slice(0, 100).flatMap((item): Task[] => {
+    if (!item || typeof item !== 'object') return []
+    const t = item as Record<string, unknown>
+    if ((typeof t.id !== 'string' && typeof t.id !== 'number') || typeof t.title !== 'string' || typeof t.start !== 'string' || typeof t.end !== 'string') return []
+    return [{ id: t.id, title: t.title.slice(0, 100), category: typeof t.category === 'string' ? t.category.slice(0, 40) : 'Personal', start: t.start, end: t.end, status: statuses.includes(t.status as TaskStatus) ? t.status as TaskStatus : 'Not started', ...(typeof t.note === 'string' ? { note: t.note.slice(0, 160) } : {}) }]
+  })
+}
 
 const demoTasks: Task[] = [
   { id: 1, title: 'Morning reset', category: 'Wellness', start: '06:30', end: '07:00', status: 'Completed', note: 'A gentle start to the day' },
@@ -51,6 +68,10 @@ function App() {
   const [mobileMenu, setMobileMenu] = useState(false)
   const [demo, setDemo] = useState(false)
   const [tasks, setTasks] = useState<Task[]>([])
+  const [dayTarget, setDayTarget] = useState<'today' | 'tomorrow'>('today')
+  const [scheduleLoading, setScheduleLoading] = useState(false)
+  const [scheduleExists, setScheduleExists] = useState(false)
+  const [scheduleSaving, setScheduleSaving] = useState(false)
   const [quests, setQuests] = useState(demoQuests)
   const [questFilter, setQuestFilter] = useState('All')
   const [showTaskForm, setShowTaskForm] = useState(false)
@@ -122,6 +143,35 @@ function App() {
     setToast(message)
     window.setTimeout(() => setToast(''), 2800)
   }
+
+  useEffect(() => {
+    if (!currentUser || demo) return
+    let active = true
+    const dateKey = localDateKey(dayTarget === 'today' ? 0 : 1)
+    setScheduleLoading(true)
+    setScheduleExists(false)
+    setTasks([])
+    getDoc(doc(db, 'users', currentUser.uid, 'schedules', dateKey))
+      .then(snapshot => {
+        if (!active) return
+        setScheduleExists(snapshot.exists())
+        setTasks(snapshot.exists() ? normalizeTasks(snapshot.data().tasks) : [])
+      })
+      .catch(() => { if (active) notify('Could not load this timetable. Check your connection and try again.') })
+      .finally(() => { if (active) setScheduleLoading(false) })
+    return () => { active = false }
+  }, [currentUser?.uid, demo, dayTarget])
+
+  const persistSchedule = async (nextTasks: Task[]) => {
+    if (!currentUser) throw new Error('Please sign in to save your timetable.')
+    const dateKey = localDateKey(dayTarget === 'today' ? 0 : 1)
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    await setDoc(doc(db, 'users', currentUser.uid, 'schedules', dateKey), {
+      dateKey, timezone, tasks: nextTasks, updatedAt: serverTimestamp(),
+      ...(!scheduleExists ? { createdAt: serverTimestamp() } : {}),
+    }, { merge: true })
+    setScheduleExists(true)
+  }
   const openDemo = () => {
     setDemo(true)
     setTasks(demoTasks)
@@ -140,16 +190,28 @@ function App() {
     setTasks([])
     setScreen('home')
   }
-  const addTask = () => {
-    if (!taskTitle.trim()) return
-    setTasks(old => [...old, { id: Date.now(), title: taskTitle.trim(), category: 'Personal', start: taskStart, end: taskEnd, status: 'Not started' as const }].sort((a,b) => a.start.localeCompare(b.start)))
+  const addTask = async () => {
+    if (!taskTitle.trim() || scheduleLoading || scheduleSaving) return
+    if (taskEnd <= taskStart) { notify('Choose an end time that is after the start time.'); return }
+    const nextTasks = [...tasks, { id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, title: taskTitle.trim(), category: 'Personal', start: taskStart, end: taskEnd, status: 'Not started' as const }].sort((a,b) => a.start.localeCompare(b.start))
+    if (demo) { setTasks(nextTasks); notify('Added to the isolated demo.') }
+    else {
+      setScheduleSaving(true)
+      try { await persistSchedule(nextTasks); setTasks(nextTasks); notify('Saved to your DAYLOCK account.') }
+      catch { notify('Could not save. Check your connection and Firestore rules, then retry.') }
+      finally { setScheduleSaving(false) }
+    }
     setTaskTitle('')
     setShowTaskForm(false)
-    notify('Added to this local demo · not saved to an account')
   }
-  const updateStatus = (id: number, status: TaskStatus) => {
-    setTasks(old => old.map(task => task.id === id ? { ...task, status } : task))
-    notify('Demo task updated · no XP is awarded in this prototype')
+  const updateStatus = async (id: number | string, status: TaskStatus) => {
+    if (scheduleLoading || scheduleSaving) return
+    const nextTasks = tasks.map(task => task.id === id ? { ...task, status } : task)
+    if (demo) { setTasks(nextTasks); notify('Demo task updated · no XP is awarded.'); return }
+    setScheduleSaving(true)
+    try { await persistSchedule(nextTasks); setTasks(nextTasks); notify('Task status saved.') }
+    catch { notify('Could not save the status. Please retry.') }
+    finally { setScheduleSaving(false) }
   }
   const updateQuest = (id: number) => setQuests(old => old.map(quest => quest.id === id ? { ...quest, progress: Math.min(quest.target, quest.progress + 1) } : quest))
   const nav = [
@@ -177,13 +239,13 @@ function App() {
       <main className="main-area">
         <header className="topbar"><button className="mobile-menu" onClick={() => setMobileMenu(true)}><Menu/></button><div className="crumb">DAYLOCK <span>/</span> {nav.find(item => item.id === screen)?.label}</div><div className="top-actions"><div className="demo-pill"><span/> {demo ? 'ISOLATED DEMO' : 'ACCOUNT ACTIVE'}</div><button className="icon-button" aria-label="Search"><Search size={17}/></button><button className="icon-button" aria-label="Settings"><Settings size={18}/></button></div></header>
         {screen === 'home' && <div className="content">
-          <section className="hero-panel"><div className="hero-copy"><div className="eyebrow"><span className="pulse"/> YOUR NEXT CHAPTER BEGINS</div><h1>Make room for<br/><em>your next chapter.</em></h1><p>Plan tomorrow with intention. Show up for today. Let the small wins become your story.</p><div className="hero-actions"><button className="primary" onClick={() => goScreen('day')}>Plan tomorrow <ArrowRight size={16}/></button><button className="secondary" onClick={() => goScreen('growth')}>Explore Growth World <Compass size={16}/></button></div></div><HeroLandscape/></section>
-          <div className="welcome-row"><div><div className="eyebrow">{today.toUpperCase()} · DEMO JOURNEY</div><h2>{demo ? 'Welcome, Explorer.' : `Welcome, ${currentUser?.displayName || currentUser?.email?.split('@')[0] || 'there'}.`}</h2><p>{demo ? 'A safe sample world to explore.' : 'Your personal DAYLOCK account is ready. Start by planning tomorrow.'}</p></div><div className="fresh-pill"><Sparkles size={16}/> {demo ? 'Sample profile · Level 1' : 'Level 1 · 0 XP'}</div></div>
-          <section className="stat-grid"><Stat icon={<Flame/>} label="Current streak" value={demo ? '4 sample days' : '0 days'} sub={demo ? 'Illustrative demo data' : 'Your journey starts today'}/><Stat icon={<Trophy/>} label="Journey XP" value={demo ? '840 sample XP' : '0 XP'} sub={demo ? 'Not connected to rewards' : 'No rewards have been earned yet'}/><Stat icon={<Target/>} label="Today's progress" value={`${completed} / ${tasks.length}`} sub="Sample tasks only"/></section>
+          <section className="hero-panel"><div className="hero-copy"><div className="eyebrow"><span className="pulse"/> YOUR NEXT CHAPTER BEGINS</div><h1>Make room for<br/><em>your next chapter.</em></h1><p>Plan tomorrow with intention. Show up for today. Let the small wins become your story.</p><div className="hero-actions"><button className="primary" onClick={() => { setDayTarget('tomorrow'); goScreen('day') }}>Plan tomorrow <ArrowRight size={16}/></button><button className="secondary" onClick={() => goScreen('growth')}>Explore Growth World <Compass size={16}/></button></div></div><HeroLandscape/></section>
+          <div className="welcome-row"><div><div className="eyebrow">{today.toUpperCase()} · DAILY CHECK-IN</div><h2>{demo ? 'Welcome, Explorer.' : `Welcome, ${currentUser?.displayName || currentUser?.email?.split('@')[0] || 'there'}.`}</h2><p>{demo ? 'A safe sample world to explore.' : 'Your personal DAYLOCK account is ready. Start by planning tomorrow.'}</p></div><div className="fresh-pill"><Sparkles size={16}/> {demo ? 'Sample profile · Level 1' : 'Level 1 · 0 XP'}</div></div>
+          <section className="stat-grid"><Stat icon={<Flame/>} label="Current streak" value={demo ? '4 sample days' : '0 days'} sub={demo ? 'Illustrative demo data' : 'Your journey starts today'}/><Stat icon={<Trophy/>} label="Journey XP" value={demo ? '840 sample XP' : '0 XP'} sub={demo ? 'Not connected to rewards' : 'No rewards have been earned yet'}/><Stat icon={<Target/>} label="Today's progress" value={`${completed} / ${tasks.length}`} sub={demo ? "Isolated demo activity" : "Your saved timetable"}/></section>
           <section className="home-grid"><div className="panel schedule-panel"><PanelTitle icon={<CalendarDays/>} title="A day with intention" action="Open My Day" onAction={() => goScreen('day')}/>{tasks.slice(0,3).map(task => <TaskRow key={task.id} task={task} onStatus={updateStatus}/>)}<div className="panel-footnote">Sample timetable · demo changes reset when you leave</div></div><div className="panel quest-panel"><PanelTitle icon={<Flag/>} title="Side quests" action="Explore" onAction={() => goScreen('growth')}/>{quests.slice(0,3).map(quest => <QuestLine key={quest.id} quest={quest}/>)}<button className="text-button" onClick={() => goScreen('growth')}>Explore all quests <ArrowRight size={14}/></button></div></section>
           <section className="world-strip"><div className="world-heading"><div><div className="eyebrow">A WORLD THAT GROWS WITH YOU</div><h2>Five realms. One evolving you.</h2><p>Explore a new path, practise a skill or celebrate a small win.</p></div><button className="text-button" onClick={() => goScreen('growth')}>Enter the world <ArrowRight size={15}/></button></div><div className="zone-grid">{zoneData.slice(0,3).map(zone => <ZoneCard key={zone.name} zone={zone} onClick={() => goScreen('growth')}/>)}</div></section>
         </div>}
-        {screen === 'day' && <div className="content"><div className="page-heading"><div className="eyebrow">MAKE SPACE FOR WHAT MATTERS</div><h1>My Day</h1><p>Prepare tomorrow before midnight. Then let today be about showing up.</p></div><div className="day-toolbar"><div><span className="lock-bullet"><LockKeyhole size={15}/> Tomorrow's plan</span><small>{demo ? 'Demo timetable · sample data only.' : 'This timetable is still a local preview. Cloud saving and server-side midnight locking are the next build stage.'}</small></div><div className="toolbar-date">{new Intl.DateTimeFormat('en-IN',{day:'numeric',month:'short',year:'numeric'}).format(new Date(Date.now()+86400000))}</div></div><div className="panel schedule-panel"><PanelTitle icon={<CalendarDays/>} title="Tomorrow's timetable" action="Add a block" onAction={() => setShowTaskForm(true)}/>{tasks.length ? tasks.map(task => <TaskRow key={task.id} task={task} onStatus={updateStatus}/>) : <Empty icon={<CalendarDays/>} title="Nothing scheduled yet." detail="Start with one useful block. You can shape the rest later." action="Add your first block" onAction={() => setShowTaskForm(true)}/>}</div>{showTaskForm && <div className="modal-backdrop"><form className="task-form panel" onSubmit={event => {event.preventDefault();addTask()}}><button type="button" className="close-form" onClick={() => setShowTaskForm(false)}><X/></button><div className="eyebrow">TOMORROW · NEW TIME BLOCK</div><h2>Add a block</h2><label>What will you work on?<input value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="e.g. Study, gym, project" required/></label><div className="time-fields"><label>Starts<input type="time" value={taskStart} onChange={event => setTaskStart(event.target.value)} required/></label><label>Ends<input type="time" value={taskEnd} onChange={event => setTaskEnd(event.target.value)} required/></label></div><button className="primary" type="submit">Add to tomorrow <Plus size={16}/></button></form></div>}</div>}
+        {screen === 'day' && <div className="content"><div className="page-heading"><div className="eyebrow">MAKE SPACE FOR WHAT MATTERS</div><h1>My Day</h1><p>Plan ahead, then focus on following through.</p></div><div className="day-toolbar"><div><span className="lock-bullet"><LockKeyhole size={15}/> {dayTarget === 'today' ? "Today's plan" : "Tomorrow's plan"}</span><small>{demo ? 'Isolated demo · changes are not saved.' : 'Saved privately to your account and synced across your devices. Midnight locking is not active yet.'}</small><div className="day-tabs"><button className={dayTarget === 'today' ? 'day-tab active' : 'day-tab'} onClick={() => { setShowTaskForm(false); setDayTarget('today') }}>Today</button><button className={dayTarget === 'tomorrow' ? 'day-tab active' : 'day-tab'} onClick={() => { setShowTaskForm(false); setDayTarget('tomorrow') }}>Tomorrow</button></div></div><div className="toolbar-date">{new Intl.DateTimeFormat('en-IN',{day:'numeric',month:'short',year:'numeric'}).format(new Date(Date.now()+(dayTarget === 'today' ? 0 : 86400000)))}</div></div><div className="panel schedule-panel"><PanelTitle icon={<CalendarDays/>} title={dayTarget === 'today' ? "Today's timetable" : "Tomorrow's timetable"} action="Add a block" onAction={() => setShowTaskForm(true)}/>{scheduleLoading ? <div className="empty-state"><b>Loading your timetable…</b></div> : tasks.length ? tasks.map(task => <TaskRow key={task.id} task={task} onStatus={updateStatus}/>) : <Empty icon={<CalendarDays/>} title="Nothing scheduled yet." detail="Start with one useful block. You can shape the rest later." action="Add your first block" onAction={() => setShowTaskForm(true)} />}{scheduleSaving && <div className="panel-footnote">Saving your changes…</div>}</div>{showTaskForm && <div className="modal-backdrop"><form className="task-form panel" onSubmit={event => {event.preventDefault();void addTask()}}><button type="button" className="close-form" onClick={() => setShowTaskForm(false)}><X/></button><div className="eyebrow">{dayTarget.toUpperCase()} · NEW TIME BLOCK</div><h2>Add a block</h2><label>What will you work on?<input value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="e.g. Study, project, reading" required maxLength={100}/></label><div className="time-fields"><label>Starts<input type="time" value={taskStart} onChange={event => setTaskStart(event.target.value)} required/></label><label>Ends<input type="time" value={taskEnd} onChange={event => setTaskEnd(event.target.value)} required/></label></div><button className="primary" type="submit" disabled={scheduleLoading || scheduleSaving}>{scheduleSaving ? 'Saving…' : 'Save time block'} <Plus size={16}/></button></form></div>}</div>}
         {screen === 'growth' && <div className="content"><div className="page-heading"><div className="eyebrow">YOUR PERSONAL ADVENTURE</div><h1>Growth World</h1><p>Small quests. New skills. A life with more stories.</p></div><div className="world-banner"><div><div className="eyebrow">CHOOSE YOUR NEXT REALM</div><h2>Every path begins<br/>with one small step.</h2><p>Explore a realm and pick a challenge that feels right for you.</p></div><div className="world-sigil">✧</div></div><div className="zone-grid full">{zoneData.map(zone => <ZoneCard key={zone.name} zone={zone} onClick={() => notify(`${zone.name} selected · realm interactions are preview-only.`)}/>)}</div><div className="panel"><PanelTitle icon={<Flag/>} title="Quest board" action="Create quest" onAction={() => notify('Custom quest creation will be implemented with the Growth database.')}/><div className="filter-row">{['All','Knowledge','Social','Adventure','Wellness','Skill'].map(filter => <button className={questFilter===filter?'filter active':'filter'} key={filter} onClick={() => setQuestFilter(filter)}>{filter}</button>)}</div>{quests.filter(quest => questFilter==='All'||quest.category===questFilter).map(quest => <div className="quest-board-row" key={quest.id}><div className="quest-icon"><Flag size={17}/></div><div className="quest-text"><b>{quest.title}</b><span>{quest.category} · {quest.progress}/{quest.target} {quest.unit} · {quest.reward} sample XP</span></div><button className="small-action" onClick={() => updateQuest(quest.id)} disabled={quest.progress>=quest.target}>Add progress</button></div>)}</div></div>}
         {screen === 'squad' && currentUser && <SquadCenter user={currentUser}/>} 
         {screen === 'insights' && <div className="content"><div className="page-heading"><div className="eyebrow">LOOK HOW FAR YOU'VE COME</div><h1>Insights</h1><p>Progress is personal. Notice patterns, not perfection.</p></div><div className="stat-grid"><Stat icon={<Target/>} label="Tasks completed" value={`${completed} sample`} sub="Demo activity only"/><Stat icon={<Flame/>} label="Current streak" value="4 sample days" sub="Not a real account streak"/><Stat icon={<Trophy/>} label="Journey XP" value="840 sample XP" sub="Not a live reward balance"/></div><div className="panel chart-panel"><PanelTitle icon={<BarChart3/>} title="A sample weekly rhythm"/><div className="bars">{[35,58,42,76,62,24,48].map((value,index)=><div className="bar-column" key={index}><div className="bar-track"><i style={{height:`${value}%`}}/></div><small>{['M','T','W','T','F','S','S'][index]}</small></div>)}</div><div className="panel-footnote">Illustrative chart · connected analytics are not implemented yet</div></div></div>}
@@ -401,7 +463,7 @@ function HeroLandscape() { return <div className="hero-art"><div className="hero
 function Stat({icon,label,value,sub}:{icon:ReactNode;label:string;value:string;sub:string}) { return <div className="stat-card"><div className="stat-icon">{icon}</div><div className="stat-label">{label}</div><div className="stat-value">{value}</div><div className="stat-sub">{sub}</div></div> }
 function PanelTitle({icon,title,action,onAction}:{icon:ReactNode;title:string;action?:string;onAction?:()=>void}) { return <div className="panel-title"><div>{icon}<h3>{title}</h3></div>{action&&<button className="text-button" onClick={onAction}>{action} <ArrowRight size={14}/></button>}</div> }
 function Empty({icon,title,detail,action,onAction}:{icon:ReactNode;title:string;detail:string;action?:string;onAction?:()=>void}) { return <div className="empty-state"><div className="empty-icon">{icon}</div><b>{title}</b><p>{detail}</p>{action&&<button className="secondary small" onClick={onAction}>{action} <ArrowRight size={14}/></button>}</div> }
-function TaskRow({task,onStatus}:{task:Task;onStatus:(id:number,status:TaskStatus)=>void}) { return <div className="task-row"><div className="task-time">{task.start}<span>—</span>{task.end}</div><div className="task-main"><b>{task.title}</b><span>{task.category}{task.note? ` · ${task.note}`:''}</span></div><select value={task.status} onChange={event => onStatus(task.id,event.target.value as TaskStatus)}><option>Not started</option><option>In progress</option><option>Completed</option><option>Skipped</option></select></div> }
+function TaskRow({task,onStatus}:{task:Task;onStatus:(id:number | string,status:TaskStatus)=>void}) { return <div className="task-row"><div className="task-time">{task.start}<span>—</span>{task.end}</div><div className="task-main"><b>{task.title}</b><span>{task.category}{task.note? ` · ${task.note}`:''}</span></div><select value={task.status} onChange={event => onStatus(task.id,event.target.value as TaskStatus)}><option>Not started</option><option>In progress</option><option>Completed</option><option>Skipped</option></select></div> }
 function QuestLine({quest}:{quest:typeof demoQuests[number]}) { return <div className="quest-line"><div className="quest-icon"><Sparkles size={16}/></div><div className="quest-text"><b>{quest.title}</b><span>{quest.category} · {quest.progress}/{quest.target} {quest.unit}</span><div className="progress-track"><i style={{width:`${quest.progress/quest.target*100}%`}}/></div></div></div> }
 function ZoneCard({zone,onClick}:{zone:typeof zoneData[number];onClick:()=>void}) { const Icon=zone.icon;return <button className={`zone-card ${zone.tone}`} onClick={onClick}><div className={`zone-art scene-${zone.scene}`}><div className="zone-glow"/><Icon size={29}/><span className="zone-spark">✦</span></div><div className="zone-info"><b>{zone.name}</b><span>{zone.sub}</span><div className="progress-track"><i style={{width:'0%'}}/></div><small>{zone.hint}</small></div><ChevronRight size={16}/></button> }
 export default App
