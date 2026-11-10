@@ -71,7 +71,7 @@ function App() {
   }
   const addTask = () => {
     if (!taskTitle.trim()) return
-    setTasks(old => [...old, { id: Date.now(), title: taskTitle.trim(), category: 'Personal', start: taskStart, end: taskEnd, status: 'Not started' }].sort((a,b) => a.start.localeCompare(b.start)))
+    setTasks(old => [...old, { id: Date.now(), title: taskTitle.trim(), category: 'Personal', start: taskStart, end: taskEnd, status: 'Not started' as const }].sort((a,b) => a.start.localeCompare(b.start)))
     setTaskTitle('')
     setShowTaskForm(false)
     notify('Added to this local demo · not saved to an account')
