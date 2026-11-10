@@ -55,3 +55,7 @@
 .member-list{margin-top:20px}.member-list>.eyebrow{margin-bottom:8px}.member-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}.member-avatar{height:33px;width:33px;display:grid;place-items:center;border-radius:50%;background:#2a3b2a;color:var(--lime);font:700 12px Manrope}.member-row>span:nth-child(2){flex:1}.member-row b,.member-row small{display:block}.member-row b{font-size:10px}.member-row small{font-size:9px;color:var(--muted);margin-top:3px}.owner-pill{font-size:8px;letter-spacing:.12em;color:var(--gold);border:1px solid rgba(216,189,128,.3);padding:5px 7px;border-radius:20px}
 .squad-note{display:flex;align-items:center;gap:8px;margin-top:14px;color:#91a18f;font-size:9px}.squad-note svg{color:var(--mint);flex:0 0 auto}
 @media(max-width:900px){.squad-layout{grid-template-columns:1fr}}
+
+
+/* My Day date switch */
+.day-tabs{display:flex;gap:6px;margin-top:7px}.day-tab{border:1px solid var(--line);background:#142017;color:#a9b8a5;border-radius:7px;padding:6px 12px;font:600 10px Manrope;cursor:pointer}.day-tab.active{background:#d3e69a;color:#172316;border-color:#d3e69a}.day-toolbar{gap:14px}.day-toolbar>div:first-child{min-width:0}.day-toolbar small{line-height:1.5;max-width:540px}@media(max-width:620px){.day-toolbar{align-items:flex-start}.toolbar-date{white-space:nowrap;padding-top:3px}}
