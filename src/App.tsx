@@ -70,7 +70,6 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [dayTarget, setDayTarget] = useState<'today' | 'tomorrow'>('today')
   const [scheduleLoading, setScheduleLoading] = useState(false)
-  const [scheduleExists, setScheduleExists] = useState(false)
   const [scheduleSaving, setScheduleSaving] = useState(false)
   const [quests, setQuests] = useState(demoQuests)
   const [questFilter, setQuestFilter] = useState('All')
@@ -154,7 +153,6 @@ function App() {
     getDoc(doc(db, 'users', currentUser.uid, 'schedules', dateKey))
       .then(snapshot => {
         if (!active) return
-        setScheduleExists(snapshot.exists())
         setTasks(snapshot.exists() ? normalizeTasks(snapshot.data().tasks) : [])
       })
       .catch(() => { if (active) notify('Could not load this timetable. Check your connection and try again.') })
@@ -174,7 +172,6 @@ function App() {
     })
     const result = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(result.error || 'The schedule could not be saved.')
-    setScheduleExists(true)
   }
   const openDemo = () => {
     setDemo(true)
@@ -203,7 +200,7 @@ function App() {
     else {
       setScheduleSaving(true)
       try { await persistSchedule(nextTasks); setTasks(nextTasks); notify('Saved to your DAYLOCK account.') }
-      catch { notify('Could not save. Check your connection and Firestore rules, then retry.') }
+      catch (error) { notify(error instanceof Error ? error.message : 'Could not save. Please retry.') }
       finally { setScheduleSaving(false) }
     }
     setTaskTitle('')
@@ -215,7 +212,7 @@ function App() {
     if (demo) { setTasks(nextTasks); notify('Demo task updated · no XP is awarded.'); return }
     setScheduleSaving(true)
     try { await persistSchedule(nextTasks); setTasks(nextTasks); notify('Task status saved.') }
-    catch { notify('Could not save the status. Please retry.') }
+    catch (error) { notify(error instanceof Error ? error.message : 'Could not save the status. Please retry.') }
     finally { setScheduleSaving(false) }
   }
   const updateQuest = (id: number) => setQuests(old => old.map(quest => quest.id === id ? { ...quest, progress: Math.min(quest.target, quest.progress + 1) } : quest))
