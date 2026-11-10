@@ -148,7 +148,6 @@ function App() {
     let active = true
     const dateKey = localDateKey(dayTarget === 'today' ? 0 : 1)
     setScheduleLoading(true)
-    setScheduleExists(false)
     setTasks([])
     getDoc(doc(db, 'users', currentUser.uid, 'schedules', dateKey))
       .then(snapshot => {
