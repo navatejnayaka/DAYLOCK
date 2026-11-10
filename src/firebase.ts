@@ -9,7 +9,7 @@ import { getFirestore } from 'firebase/firestore'
 // Firebase's web config identifies this project. It is not a service-account key.
 // Secure access through Authentication and Firestore Security Rules, not by hiding this config.
 const firebaseConfig = {
-  apiKey: 'AIzaSyC_lhTevsT8w4LewsmijJq8pgYsV4uoAHWU',
+  apiKey: 'AIzaSyC_lhTevsT8w4LewsmiJq8pgYsV4uoAHWU',
   authDomain: 'daylock-2818b.firebaseapp.com',
   projectId: 'daylock-2818b',
   storageBucket: 'daylock-2818b.firebasestorage.app',
