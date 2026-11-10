@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function squadPath(squadId) {
+      return /databases/$(database)/documents/squads/$(squadId);
+    }
+    function memberPath(squadId, memberId) {
+      return /databases/$(database)/documents/squads/$(squadId)/members/$(memberId);
+    }
+    function userSquadPath(userId, squadId) {
+      return /databases/$(database)/documents/users/$(userId)/squads/$(squadId);
+    }
+    function invitePath(code) {
+      return /databases/$(database)/documents/squadInvites/$(code);
+    }
+    function isMember(squadId) {
+      return signedIn() && exists(memberPath(squadId, uid()));
+    }
+    function isOwner(squadId) {
+      return isMember(squadId) && get(memberPath(squadId, uid())).data.role == 'owner';
+    }
+
+    match /squads/{squadId} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['name', 'createdBy', 'inviteCode', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 3
+        && request.resource.data.name.size() <= 32
+        && request.resource.data.createdBy == uid()
+        && request.resource.data.inviteCode is string
+        && request.resource.data.inviteCode.matches('^[A-HJ-NP-Z2-9]{10}$');
+      allow get: if isMember(squadId);
+      allow list: if false;
+      allow update: if isOwner(squadId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 3
+        && request.resource.data.name.size() <= 32;
+      allow delete: if false;
+
+      match /members/{memberId} {
+        allow get: if signedIn() && (memberId == uid() || isMember(squadId));
+        allow list: if isMember(squadId);
+        allow create: if signedIn()
+          && memberId == uid()
+          && request.resource.data.keys().hasOnly(['uid', 'displayName', 'role', 'inviteCode', 'joinedAt'])
+          && request.resource.data.uid == uid()
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() >= 1
+          && request.resource.data.displayName.size() <= 40
+          && (
+            (request.resource.data.role == 'owner'
+              && getAfter(squadPath(squadId)).data.createdBy == uid())
+            ||
+            (request.resource.data.role == 'member'
+              && request.resource.data.inviteCode is string
+              && get(invitePath(request.resource.data.inviteCode)).data.squadId == squadId
+              && get(invitePath(request.resource.data.inviteCode)).data.active == true
+              && exists(squadPath(squadId)))
+          );
+        allow update: if false;
+        allow delete: if signedIn() && memberId == uid() && resource.data.role == 'member';
+      }
+    }
+
+    match /users/{userId}/squads/{squadId} {
+      allow get, list: if signedIn() && userId == uid();
+      allow create: if signedIn()
+        && userId == uid()
+        && request.resource.data.keys().hasOnly(['squadId', 'name', 'role', 'joinedAt'])
+        && request.resource.data.squadId == squadId
+        && request.resource.data.name is string
+        && request.resource.data.role in ['owner', 'member']
+        && getAfter(memberPath(squadId, uid())).data.uid == uid();
+      allow update, delete: if false;
+    }
+
+    match /squadInvites/{inviteCode} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn()
+        && inviteCode.matches('^[A-HJ-NP-Z2-9]{10}$')
+        && request.resource.data.keys().hasOnly(['squadId', 'squadName', 'createdBy', 'active', 'createdAt'])
+        && request.resource.data.createdBy == uid()
+        && request.resource.data.squadName is string
+        && request.resource.data.active == true
+        && getAfter(squadPath(request.resource.data.squadId)).data.createdBy == uid()
+        && getAfter(memberPath(request.resource.data.squadId, uid())).data.role == 'owner';
+      allow update: if signedIn()
+        && isOwner(resource.data.squadId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['active']);
+      allow delete: if signedIn() && isOwner(resource.data.squadId);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
