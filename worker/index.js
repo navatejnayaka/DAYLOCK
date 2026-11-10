@@ -1,0 +1,328 @@
+import { importPKCS8, importX509, SignJWT, jwtVerify } from "jose";
+
+const PROJECT_ID = "daylock-2818b";
+const ISSUER = `https://securetoken.google.com/${PROJECT_ID}`;
+const CERT_URL = "https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com";
+const TOKEN_URL = "https://oauth2.googleapis.com/token";
+const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
+
+let certCache = null;
+let certCacheUntil = 0;
+let serviceToken = null;
+let serviceTokenUntil = 0;
+let serviceKeyPromise = null;
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function decodeValue(value) {
+  if (!value || typeof value !== "object") return null;
+  if ("stringValue" in value) return value.stringValue;
+  if ("booleanValue" in value) return value.booleanValue;
+  if ("integerValue" in value) return Number(value.integerValue);
+  if ("doubleValue" in value) return Number(value.doubleValue);
+  if ("timestampValue" in value) return value.timestampValue;
+  if ("nullValue" in value) return null;
+  if ("arrayValue" in value) return (value.arrayValue.values || []).map(decodeValue);
+  if ("mapValue" in value) return decodeFields(value.mapValue.fields || {});
+  return null;
+}
+
+function decodeFields(fields) {
+  return Object.fromEntries(Object.entries(fields || {}).map(([key, value]) => [key, decodeValue(value)]));
+}
+
+function encodeValue(value) {
+  if (value === null || value === undefined) return { nullValue: null };
+  if (typeof value === "string") return { stringValue: value };
+  if (typeof value === "boolean") return { booleanValue: value };
+  if (typeof value === "number") return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
+  if (Array.isArray(value)) return { arrayValue: { values: value.map(encodeValue) } };
+  return { mapValue: { fields: Object.fromEntries(Object.entries(value).map(([key, item]) => [key, encodeValue(item)])) } };
+}
+
+function encodeFields(value) {
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, encodeValue(item)]));
+}
+
+function isValidDateKey(value) {
+  if (typeof value !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function addDays(dateKey, amount) {
+  const [year, month, day] = dateKey.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day + amount));
+  return date.toISOString().slice(0, 10);
+}
+
+function localDateKey(timezone, instant = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(instant);
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
+function validateTasks(value) {
+  const validStatuses = new Set(["Not started", "In progress", "Completed", "Skipped"]);
+  if (!Array.isArray(value) || value.length > 100) throw new Error("A timetable can contain at most 100 tasks.");
+  return value.map((task, index) => {
+    if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error(`Task ${index + 1} is invalid.`);
+    const { id, title, category, start, end, status, note } = task;
+    if (typeof id !== "string" || id.length < 1 || id.length > 80) throw new Error(`Task ${index + 1} has an invalid ID.`);
+    if (typeof title !== "string" || title.trim().length < 1 || title.length > 100) throw new Error(`Task ${index + 1} needs a title up to 100 characters.`);
+    if (typeof category !== "string" || category.length > 40) throw new Error(`Task ${index + 1} has an invalid category.`);
+    if (typeof start !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(start)) throw new Error(`Task ${index + 1} has an invalid start time.`);
+    if (typeof end !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(end) || end <= start) throw new Error(`Task ${index + 1} has an invalid end time.`);
+    if (!validStatuses.has(status)) throw new Error(`Task ${index + 1} has an invalid status.`);
+    if (note !== undefined && (typeof note !== "string" || note.length > 160)) throw new Error(`Task ${index + 1} has an invalid note.`);
+    return { id, title: title.trim(), category, start, end, status, ...(note ? { note } : {}) };
+  });
+}
+
+function sameTaskDetails(before, after) {
+  return before.id === after.id
+    && before.title === after.title
+    && before.category === after.category
+    && before.start === after.start
+    && before.end === after.end
+    && (before.note || "") === (after.note || "");
+}
+
+function toBase64Url(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary).replace(/=/g, "").replace(/\\+/g, "-").replace(/\\//g, "_");
+}
+
+async function verifyFirebaseIdToken(token) {
+  const now = Date.now();
+  if (!certCache || now >= certCacheUntil) {
+    const response = await fetch(CERT_URL, { headers: { accept: "application/json" } });
+    if (!response.ok) throw new Error("Could not retrieve Firebase token verification certificates.");
+    certCache = await response.json();
+    const cacheControl = response.headers.get("cache-control") || "";
+    const maxAge = Number(cacheControl.match(/max-age=(\\d+)/)?.[1] || 300);
+    certCacheUntil = now + Math.max(60, Math.min(maxAge, 3600)) * 1000;
+  }
+
+  const { payload, protectedHeader } = await jwtVerify(token, async header => {
+    if (header.alg !== "RS256" || typeof header.kid !== "string" || !certCache[header.kid]) {
+      throw new Error("Firebase token signing key is not valid.");
+    }
+    return importX509(certCache[header.kid], "RS256");
+  }, {
+    algorithms: ["RS256"],
+    audience: PROJECT_ID,
+    issuer: ISSUER,
+    clockTolerance: 5,
+  });
+
+  const seconds = Math.floor(now / 1000);
+  if (protectedHeader.alg !== "RS256" || typeof payload.sub !== "string" || !payload.sub
+    || payload.sub.length > 128 || typeof payload.auth_time !== "number"
+    || payload.auth_time > seconds + 5 || typeof payload.iat !== "number"
+    || payload.iat > seconds + 5 || typeof payload.exp !== "number" || payload.exp <= seconds) {
+    throw new Error("Firebase sign-in token is invalid or expired.");
+  }
+  return payload.sub;
+}
+
+async function getGoogleAccessToken(serviceAccount) {
+  const now = Date.now();
+  if (serviceToken && now < serviceTokenUntil - 60_000) return serviceToken;
+  if (!serviceKeyPromise) serviceKeyPromise = importPKCS8(serviceAccount.private_key, "RS256");
+  const key = await serviceKeyPromise;
+  const assertion = await new SignJWT({ scope: FIRESTORE_SCOPE })
+    .setProtectedHeader({ alg: "RS256", typ: "JWT" })
+    .setIssuer(serviceAccount.client_email)
+    .setAudience(TOKEN_URL)
+    .setIssuedAt()
+    .setExpirationTime("1h")
+    .sign(key);
+
+  const response = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok || !result.access_token) throw new Error("Google could not issue the Firestore access token.");
+  serviceToken = result.access_token;
+  serviceTokenUntil = now + Number(result.expires_in || 3600) * 1000;
+  return serviceToken;
+}
+
+async function firestoreRequest(url, accessToken, options = {}) {
+  return fetch(url, {
+    ...options,
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      ...(options.headers || {}),
+    },
+  });
+}
+
+async function saveSchedule(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    return json({ error: "The schedule server is not configured yet. Add its Cloudflare secret first." }, 503);
+  }
+
+  let body;
+  try {
+    const length = Number(request.headers.get("content-length") || 0);
+    if (length > 48_000) return json({ error: "Timetable request is too large." }, 413);
+    body = await request.json();
+  } catch {
+    return json({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  const { dateKey, timezone } = body || {};
+  if (!isValidDateKey(dateKey)) return json({ error: "Invalid timetable date." }, 400);
+  if (typeof timezone !== "string" || timezone.length > 80) return json({ error: "Choose a valid timezone." }, 400);
+
+  let today;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    today = localDateKey(timezone);
+  } catch {
+    return json({ error: "The selected timezone is not valid." }, 400);
+  }
+
+  let tasks;
+  try {
+    tasks = validateTasks(body.tasks);
+  } catch (error) {
+    return json({ error: error.message || "Invalid timetable tasks." }, 400);
+  }
+
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) {
+      return json({ error: "The Cloudflare service-account secret is not for the DAYLOCK Firebase project." }, 503);
+    }
+  } catch {
+    return json({ error: "The Cloudflare service-account secret is not valid JSON." }, 503);
+  }
+
+  try {
+    const accessToken = await getGoogleAccessToken(serviceAccount);
+    const documentName = `projects/${PROJECT_ID}/databases/(default)/documents/users/${encodeURIComponent(uid)}/schedules/${dateKey}`;
+    const documentUrl = `https://firestore.googleapis.com/v1/${documentName}`;
+    const readResponse = await firestoreRequest(documentUrl, accessToken);
+    let existing = null;
+
+    if (readResponse.ok) {
+      existing = await readResponse.json();
+    } else if (readResponse.status !== 404) {
+      return json({ error: "Could not load your saved timetable from Firestore." }, 502);
+    }
+
+    const existingData = existing ? decodeFields(existing.fields) : null;
+    const lockedTimezone = existingData?.timezone || timezone;
+    if (existingData && existingData.timezone !== timezone) {
+      return json({ error: `This timetable is tied to ${existingData.timezone}. Change your device timezone back to save it.` }, 409);
+    }
+
+    const scheduleToday = localDateKey(lockedTimezone);
+    const nextDay = addDays(scheduleToday, 1);
+    let mode;
+
+    if (!existing) {
+      if (dateKey !== nextDay) {
+        return json({ error: "A new timetable can only be created for tomorrow. Plan it before midnight." }, 423);
+      }
+      mode = "create";
+    } else if (dateKey === nextDay) {
+      mode = "edit";
+    } else if (dateKey === scheduleToday) {
+      const oldTasks = Array.isArray(existingData.tasks) ? existingData.tasks : [];
+      const statusOnly = oldTasks.length === tasks.length
+        && oldTasks.every((oldTask, index) => sameTaskDetails(oldTask, tasks[index]));
+      if (!statusOnly) {
+        return json({ error: "Today's timetable is sealed. You can only change task statuses." }, 423);
+      }
+      mode = "status";
+    } else {
+      return json({ error: "This timetable is sealed. Only today's task statuses can be updated." }, 423);
+    }
+
+    const timestamp = new Date().toISOString();
+    const values = {
+      dateKey,
+      timezone: lockedTimezone,
+      tasks,
+      createdAt: existingData?.createdAt || timestamp,
+      updatedAt: timestamp,
+    };
+    const params = new URLSearchParams();
+    for (const field of ["dateKey", "timezone", "tasks", "createdAt", "updatedAt"]) {
+      params.append("updateMask.fieldPaths", field);
+    }
+    if (mode === "create") params.set("currentDocument.exists", "false");
+    else params.set("currentDocument.updateTime", existing.updateTime);
+
+    const writeResponse = await firestoreRequest(`${documentUrl}?${params.toString()}`, accessToken, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fields: encodeFields(values) }),
+    });
+
+    if (!writeResponse.ok) {
+      return json({ error: writeResponse.status === 409 || writeResponse.status === 400
+        ? "Your timetable changed at the same time. Refresh and try again."
+        : "Could not save your timetable. Please try again." }, writeResponse.status === 409 ? 409 : 502);
+    }
+
+    return json({ ok: true, mode, dateKey, tasks });
+  } catch (error) {
+    console.error("DAYLOCK schedule save failed", error);
+    return json({ error: "The schedule service could not complete the save. Please retry." }, 502);
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/api/")) {
+      if (request.method !== "POST" && url.pathname !== "/api/health") {
+        return json({ error: "Method not allowed." }, 405);
+      }
+      if (url.pathname === "/api/health" && request.method === "POST") return json({ ok: true });
+      if (url.pathname !== "/api/schedules/save") return json({ error: "Not found." }, 404);
+
+      const origin = request.headers.get("origin");
+      if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
+      const authorization = request.headers.get("authorization") || "";
+      const match = authorization.match(/^Bearer (.+)$/);
+      if (!match) return json({ error: "Please sign in again." }, 401);
+
+      try {
+        const uid = await verifyFirebaseIdToken(match[1]);
+        return await saveSchedule(request, env, uid);
+      } catch (error) {
+        console.warn("DAYLOCK request authentication failed", error);
+        return json({ error: "Your session could not be verified. Sign in again and retry." }, 401);
+      }
+    }
+
+    return env.ASSETS.fetch(request);
+  },
+};
