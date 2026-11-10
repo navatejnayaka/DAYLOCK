@@ -6,7 +6,7 @@ DAYLOCK is a productivity and personal-growth platform combining a cinematic Lif
 
 ## Current repository status
 
-This is the initial frontend foundation. It includes a responsive landing page and interactive local prototype screens. Authentication, cloud persistence, server-enforced midnight locking, XP reward transactions, and real Squad functionality are **not yet implemented**.
+This is the initial frontend foundation with a responsive public landing page, isolated sample demo, and Firebase Email/Password authentication. Firestore user data, cloud timetable persistence, server-enforced midnight locking, XP reward transactions, and real Squad functionality are **not yet implemented**.
 
 ## Design direction
 
@@ -29,7 +29,7 @@ npm run dev
 
 - Frontend: React + TypeScript + Vite
 - Styling: CSS variables and responsive CSS
-- Authentication and database: Firebase (planned; configure before enabling real accounts)
+- Authentication: Firebase Email/Password (connected in this version). Firestore profile and schedule storage: next stage, after security rules are published.
 - Hosting: Cloudflare Pages or another static frontend host (planned)
 
 ## Product rules
@@ -46,11 +46,12 @@ npm run dev
 ## Development stages
 
 1. Landing page and responsive visual system
-2. Authentication and private profiles
-3. Timetable and server-side midnight locking
-4. Growth World, quests, habits and milestones
-5. Squad challenges and sharing permissions
-6. Insights, notifications, security review and launch
+2. Firebase Email/Password authentication and persistent sessions
+3. Firestore profile and schedule storage with owner-only rules
+4. Timetable and server-side midnight locking
+5. Growth World, quests, habits and milestones
+6. Squad challenges and sharing permissions
+7. Insights, notifications, security review and launch
 
 ## Security
 
