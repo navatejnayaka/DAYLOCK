@@ -77,6 +77,32 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    match /users/{userId}/schedules/{dateKey} {
+      allow get, list: if signedIn() && userId == uid();
+
+      allow create: if signedIn()
+        && userId == uid()
+        && request.resource.data.keys().hasOnly(['dateKey', 'timezone', 'tasks', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasAll(['dateKey', 'timezone', 'tasks', 'createdAt', 'updatedAt'])
+        && request.resource.data.dateKey == dateKey
+        && request.resource.data.timezone is string
+        && request.resource.data.timezone.size() <= 80
+        && request.resource.data.tasks is list
+        && request.resource.data.tasks.size() <= 100;
+
+      allow update: if signedIn()
+        && userId == uid()
+        && request.resource.data.keys().hasOnly(['dateKey', 'timezone', 'tasks', 'createdAt', 'updatedAt'])
+        && request.resource.data.dateKey == dateKey
+        && request.resource.data.timezone is string
+        && request.resource.data.timezone.size() <= 80
+        && request.resource.data.tasks is list
+        && request.resource.data.tasks.size() <= 100
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['timezone', 'tasks', 'updatedAt']);
+
+      allow delete: if signedIn() && userId == uid();
+    }
+
     match /squadInvites/{inviteCode} {
       allow get: if signedIn();
       allow list: if false;
