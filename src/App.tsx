@@ -13,10 +13,11 @@ import {
   signOut,
   updateProfile,
   updatePassword,
+  verifyBeforeUpdateEmail,
 } from 'firebase/auth'
 import { auth, authPersistenceReady, getDaylockMessaging, vapidPublicKey } from './firebase'
 import { getToken } from 'firebase/messaging'
-import { addDoc, collection, doc, getDoc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore'
+import { addDoc, collection, doc, getDoc, getDocs, serverTimestamp, writeBatch, setDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import {
   AlertTriangle, ArrowRight, ArrowUpRight, BarChart3, BookOpen, CalendarDays, Check, History,
@@ -136,6 +137,12 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [profileName, setProfileName] = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
+  const [emailChangeInput, setEmailChangeInput] = useState('')
+  const [emailChangePassword, setEmailChangePassword] = useState('')
+  const [emailChanging, setEmailChanging] = useState(false)
+  const [exportingData, setExportingData] = useState(false)
+  const [privacyShareDisplayName, setPrivacyShareDisplayName] = useState(true)
+  const [privacySaving, setPrivacySaving] = useState(false)
   const [emailVerified, setEmailVerified] = useState(false)
   const [verificationSending, setVerificationSending] = useState(false)
   const [currentPasswordInput, setCurrentPasswordInput] = useState('')
@@ -176,6 +183,14 @@ function App() {
 
   useEffect(() => { setProfileName(currentUser?.displayName || '') }, [currentUser?.uid, currentUser?.displayName])
   useEffect(() => { setEmailVerified(Boolean(currentUser?.emailVerified)) }, [currentUser?.uid, currentUser?.emailVerified])
+  useEffect(() => {
+    if (!currentUser || demo) { setPrivacyShareDisplayName(true); return }
+    let active = true
+    getDoc(doc(db, 'users', currentUser.uid, 'settings', 'privacy'))
+      .then(snapshot => { if (active) setPrivacyShareDisplayName(snapshot.exists() ? snapshot.data().shareDisplayNameWithSquads !== false : true) })
+      .catch(() => { if (active) notify('Could not load your privacy settings.') })
+    return () => { active = false }
+  }, [currentUser?.uid, demo])
 
   const saveProfile = async () => {
     if (!currentUser) { notify('Sign in to edit your profile.'); return }
@@ -213,6 +228,113 @@ function App() {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not refresh verification status.')
     }
+  }
+
+  const changeAccountEmail = async () => {
+    if (!currentUser?.email) { notify('A signed-in email account is required.'); return }
+    const nextEmail = emailChangeInput.trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(nextEmail)) { notify('Enter a valid new email address.'); return }
+    if (nextEmail === currentUser.email.toLowerCase()) { notify('That is already your current email address.'); return }
+    if (!emailChangePassword) { notify('Enter your current password to continue.'); return }
+    setEmailChanging(true)
+    try {
+      const credential = EmailAuthProvider.credential(currentUser.email, emailChangePassword)
+      await reauthenticateWithCredential(currentUser, credential)
+      await verifyBeforeUpdateEmail(currentUser, nextEmail)
+      setEmailChangeInput('')
+      setEmailChangePassword('')
+      notify('Confirmation link sent to your new email address. Your login email changes after you open it.')
+    } catch (error) {
+      const code = (error as { code?: string })?.code || ''
+      notify(code.includes('auth/wrong-password') || code.includes('auth/invalid-credential')
+        ? 'Your current password is incorrect.'
+        : error instanceof Error ? error.message : 'Could not start the email change.')
+    } finally { setEmailChanging(false) }
+  }
+
+  const savePrivacyPreference = async (share: boolean) => {
+    if (!currentUser) return
+    setPrivacySaving(true)
+    try {
+      const memberships = await getDocs(collection(db, 'users', currentUser.uid, 'squads'))
+      const refs = await Promise.all(memberships.docs.map(async membership => {
+        const memberRef = doc(db, 'squads', membership.id, 'members', currentUser.uid)
+        const memberSnap = await getDoc(memberRef)
+        return memberSnap.exists() ? memberRef : null
+      }))
+      for (let start = 0; start < refs.length; start += 450) {
+        const chunk = refs.slice(start, start + 450)
+        const batch = writeBatch(db)
+        chunk.forEach(ref => { if (ref) batch.update(ref, { displayName: share ? (currentUser.displayName?.trim() || 'DAYLOCK Member') : 'DAYLOCK Member' }) })
+        if (chunk.some(Boolean)) await batch.commit()
+      }
+      await setDoc(doc(db, 'users', currentUser.uid, 'settings', 'privacy'), {
+        shareDisplayNameWithSquads: share,
+        updatedAt: serverTimestamp(),
+      }, { merge: true })
+      setPrivacyShareDisplayName(share)
+      notify(share ? 'Your display name is visible to your squad members.' : 'Your name is now hidden from squad member lists.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not save your privacy preference.')
+    } finally { setPrivacySaving(false) }
+  }
+
+  const exportAccountData = async () => {
+    if (!currentUser) { notify('Sign in to export your data.'); return }
+    setExportingData(true)
+    try {
+      const uid = currentUser.uid
+      const [scheduleSnap, habitSnap, questSnap, progressSnap, xpSnap, habitDaySnap, squadSnap, reminderSnap, privacySnap] = await Promise.all([
+        getDocs(collection(db, 'users', uid, 'schedules')),
+        getDocs(collection(db, 'users', uid, 'habits')),
+        getDocs(collection(db, 'users', uid, 'quests')),
+        getDocs(collection(db, 'users', uid, 'progress')),
+        getDocs(collection(db, 'users', uid, 'xpEvents')),
+        getDocs(collection(db, 'users', uid, 'habitDays')),
+        getDocs(collection(db, 'users', uid, 'squads')),
+        getDocs(collection(db, 'users', uid, 'reminderSettings')),
+        getDoc(doc(db, 'users', uid, 'settings', 'privacy')),
+      ])
+      const schedules = await Promise.all(scheduleSnap.docs.map(async item => {
+        const audit = await getDocs(collection(db, 'users', uid, 'schedules', item.id, 'audit'))
+        return { id: item.id, ...item.data(), audit: audit.docs.map(entry => ({ id: entry.id, ...entry.data() })) }
+      }))
+      const habits = await Promise.all(habitSnap.docs.map(async item => {
+        const completions = await getDocs(collection(db, 'users', uid, 'habits', item.id, 'completions'))
+        return { id: item.id, ...item.data(), completions: completions.docs.map(entry => ({ id: entry.id, ...entry.data() })) }
+      }))
+      const payload = {
+        product: 'DAYLOCK',
+        exportVersion: 1,
+        exportedAt: new Date().toISOString(),
+        account: { email: currentUser.email, displayName: currentUser.displayName, emailVerified: currentUser.emailVerified, uid },
+        schedules,
+        habits,
+        quests: questSnap.docs.map(item => ({ id: item.id, ...item.data() })),
+        progress: progressSnap.docs.map(item => ({ id: item.id, ...item.data() })),
+        xpEvents: xpSnap.docs.map(item => ({ id: item.id, ...item.data() })),
+        habitDays: habitDaySnap.docs.map(item => ({ id: item.id, ...item.data() })),
+        squads: squadSnap.docs.map(item => ({ id: item.id, ...item.data() })),
+        privacy: privacySnap.exists() ? privacySnap.data() : { shareDisplayNameWithSquads: true },
+        reminders: reminderSnap.docs.map(item => {
+          const data = item.data()
+          return { id: item.id, timezone: data.timezone || null, reminders: data.reminders || null, updatedAt: data.updatedAt || null, deviceRegistered: Boolean(data.token) }
+        }),
+        privacyNote: 'Push notification tokens and authentication credentials are not included in this export.',
+      }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = 'daylock-data-' + new Date().toISOString().slice(0, 10) + '.json'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      notify('Your DAYLOCK data export is ready.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not export your DAYLOCK data.')
+    } finally { setExportingData(false) }
   }
 
   const changeAccountPassword = async () => {
@@ -848,13 +970,21 @@ function App() {
         </div>}
         {screen === 'day' && <div className="content"><div className="page-heading"><div className="eyebrow">MAKE SPACE FOR WHAT MATTERS</div><h1>My Day</h1><p>Plan ahead, then focus on following through.</p></div><div className="day-toolbar"><div><span className="lock-bullet"><LockKeyhole size={15}/> {dayTarget === 'today' ? "Today's plan" : "Tomorrow's plan"}</span><small>{demo ? 'Isolated demo · changes are not saved.' : dayTarget === 'today' ? 'Sealed by the server. You can update task statuses, but not task details.' : 'Tomorrow is editable until midnight in your timezone. The server enforces the lock.'}</small><div className="day-tabs"><button className={dayTarget === 'today' ? 'day-tab active' : 'day-tab'} onClick={() => { setShowTaskForm(false); setDayTarget('today') }}>Today</button><button className={dayTarget === 'tomorrow' ? 'day-tab active' : 'day-tab'} onClick={() => { setShowTaskForm(false); setDayTarget('tomorrow') }}>Tomorrow</button></div></div><div className="toolbar-date">{new Intl.DateTimeFormat('en-IN',{day:'numeric',month:'short',year:'numeric'}).format(new Date(Date.now()+(dayTarget === 'today' ? 0 : 86400000)))}</div></div><div className="panel schedule-panel"><PanelTitle icon={<CalendarDays/>} title={dayTarget === 'today' ? "Today's timetable" : "Tomorrow's timetable"} action={demo || dayTarget === 'tomorrow' ? "Add a block" : undefined} onAction={() => setShowTaskForm(true)}/>{scheduleLoading ? <div className="empty-state"><b>Loading your timetable…</b></div> : tasks.length ? tasks.map(task => <TaskRow key={task.id} task={task} onStatus={updateStatus}/>) : <Empty icon={<CalendarDays/>} title="Nothing scheduled yet." detail="Start with one useful block. You can shape the rest later." action={demo || dayTarget === 'tomorrow' ? "Add your first block" : undefined} onAction={() => setShowTaskForm(true)} />}{scheduleSaving && <div className="panel-footnote">Saving your changes…</div>}</div>{!demo && dayTarget === 'today' && scheduleExists && <div className="emergency-actions"><button className="secondary" onClick={openEmergencyOverride}><AlertTriangle size={15}/> Emergency override</button><button className="text-button" onClick={loadAuditHistory}><History size={15}/> View audit history</button></div>}{showAuditHistory && <div className="panel audit-panel"><PanelTitle icon={<History/>} title="Emergency audit history" action="Close" onAction={() => setShowAuditHistory(false)}/>{auditHistory.length ? auditHistory.map(record => <article className="audit-entry" key={record.id}><div className="audit-entry-top"><b>Emergency amendment</b><time>{record.occurredAt ? new Intl.DateTimeFormat('en-IN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(record.occurredAt)) : 'Timestamp unavailable'}</time></div><p><strong>Reason:</strong> {record.reason}</p><details><summary>View preserved before/after snapshots</summary><div className="audit-snapshots"><div><b>Original</b>{record.beforeTasks.map(task => <span key={task.id}>{task.start}–{task.end} · {task.title}</span>)}</div><div><b>Amended</b>{record.afterTasks.map(task => <span key={task.id}>{task.start}–{task.end} · {task.title}</span>)}</div></div></details></article>) : <div className="empty-state"><b>No emergency amendments recorded.</b><p>Every approved emergency change will appear here.</p></div>}</div>}{showOverrideForm && <div className="modal-backdrop"><form className="task-form panel override-form" onSubmit={event => {event.preventDefault();void saveEmergencyOverride()}}><button type="button" className="close-form" onClick={() => setShowOverrideForm(false)}><X/></button><div className="eyebrow">SEALED SCHEDULE · AUDITED CHANGE</div><h2>Emergency override</h2><p className="override-explainer">Use this only when an important unexpected event requires a change. The original timetable will remain in the audit history.</p><label>Task to amend<select value={overrideTaskId} onChange={event => {const task=tasks.find(item=>String(item.id)===event.target.value);setOverrideTaskId(event.target.value);if(task){setOverrideTitle(task.title);setOverrideStart(task.start);setOverrideEnd(task.end)}}}>{tasks.map(task=><option key={task.id} value={String(task.id)}>{task.start} · {task.title}</option>)}</select></label><label>Updated task title<input value={overrideTitle} onChange={event=>setOverrideTitle(event.target.value)} required maxLength={100}/></label><div className="time-fields"><label>Starts<input type="time" value={overrideStart} onChange={event=>setOverrideStart(event.target.value)} required/></label><label>Ends<input type="time" value={overrideEnd} onChange={event=>setOverrideEnd(event.target.value)} required/></label></div><label>Reason for emergency change<textarea value={overrideReason} onChange={event=>setOverrideReason(event.target.value)} placeholder="Explain what changed and why this amendment is necessary…" minLength={10} maxLength={500} required rows={3}/></label><button className="primary" type="submit" disabled={scheduleSaving}>{scheduleSaving ? 'Recording amendment…' : 'Confirm emergency override'} <AlertTriangle size={15}/></button></form></div>}{showTaskForm && <div className="modal-backdrop"><form className="task-form panel" onSubmit={event => {event.preventDefault();void addTask()}}><button type="button" className="close-form" onClick={() => setShowTaskForm(false)}><X/></button><div className="eyebrow">{dayTarget.toUpperCase()} · NEW TIME BLOCK</div><h2>Add a block</h2><label>What will you work on?<input value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="e.g. Study, project, reading" required maxLength={100}/></label><div className="time-fields"><label>Starts<input type="time" value={taskStart} onChange={event => setTaskStart(event.target.value)} required/></label><label>Ends<input type="time" value={taskEnd} onChange={event => setTaskEnd(event.target.value)} required/></label></div><button className="primary" type="submit" disabled={scheduleLoading || scheduleSaving}>{scheduleSaving ? 'Saving…' : 'Save time block'} <Plus size={16}/></button></form></div>}</div>}
         {screen === 'growth' && <div className="content"><div className="page-heading"><div className="eyebrow">YOUR PERSONAL ADVENTURE</div><h1>Growth World</h1><p>Small quests. New skills. A life with more stories.</p><div className="eyebrow">LEVEL {level} · {xpTotal} XP EARNED</div></div><div className="world-banner"><div><div className="eyebrow">CHOOSE YOUR NEXT REALM</div><h2>Every path begins<br/>with one small step.</h2><p>Explore a realm and pick a challenge that feels right for you.</p></div><div className="world-sigil">✧</div></div><div className="zone-grid full">{zoneData.map(zone => <ZoneCard key={zone.name} zone={zone} onClick={() => {setQuestFilter(zone.name==='Discipline Forest'?'Wellness':zone.name==='Knowledge Tower'?'Knowledge':zone.name==='Social Harbor'?'Social':zone.name==='Adventure Isles'?'Adventure':'Skill');notify(`${zone.name} · matching quests selected below.`)}}/>)}</div><div className="panel"><PanelTitle icon={<Sprout/>} title="Daily habits" action="Add habit" onAction={() => setShowHabitForm(true)}/><p className="panel-footnote">Small actions you can check off once each day. Your check-ins are saved to your account.</p>{habitsLoading ? <div className="empty-state"><b>Loading your habits…</b></div> : habits.length ? habits.map(habit => <div className="quest-board-row" key={habit.id}><div className="quest-icon"><Sprout size={17}/></div><div className="quest-text"><b>{habit.title}</b><span>{habit.category} · {completedHabitIds.includes(habit.id) ? 'Completed today' : 'Not completed today'}</span></div><button className="small-action" onClick={() => void completeHabit(habit.id)} disabled={completedHabitIds.includes(habit.id) || habitSaving}>{completedHabitIds.includes(habit.id) ? 'Done today' : 'Mark done'}</button></div>) : <Empty icon={<Sprout/>} title="Start with one small habit." detail={demo ? 'Add a habit to try the daily check-in.' : 'Add a daily habit and mark it complete when you do it.'} action="Add your first habit" onAction={() => setShowHabitForm(true)}/>}</div>{showHabitForm && <div className="modal-backdrop"><form className="task-form panel quest-form" onSubmit={createHabit}><button type="button" className="close-form" onClick={() => setShowHabitForm(false)}><X/></button><div className="eyebrow">GROWTH WORLD · DAILY RITUAL</div><h2>Add a daily habit</h2><label>Habit name<input value={habitTitle} onChange={event=>setHabitTitle(event.target.value)} placeholder="e.g. Walk for 15 minutes" maxLength={80} required/></label><label>Category<select value={habitCategory} onChange={event=>setHabitCategory(event.target.value)}><option>Wellness</option><option>Knowledge</option><option>Skill</option><option>Social</option><option>Personal</option></select></label><p className="override-explainer">Check off each habit once per day to earn 5 XP. Your daily check-ins and rewards are saved to your account.</p><button className="primary" type="submit" disabled={habitSaving}>{habitSaving ? 'Saving habit…' : 'Save daily habit'} <Plus size={16}/></button></form></div>}<div className="panel"><PanelTitle icon={<Flag/>} title="Quest board" action="Create quest" onAction={() => setShowQuestForm(true)}/><div className="filter-row">{['All','Knowledge','Social','Adventure','Wellness','Skill'].map(filter => <button className={questFilter===filter?'filter active':'filter'} key={filter} onClick={() => setQuestFilter(filter)}>{filter}</button>)}</div>{questsLoading ? <div className="empty-state"><b>Loading your quests…</b></div> : quests.filter(quest => questFilter==='All'||quest.category===questFilter).length ? quests.filter(quest => questFilter==='All'||quest.category===questFilter).map(quest => <div className="quest-board-row" key={quest.id}><div className="quest-icon"><Flag size={17}/></div><div className="quest-text"><b>{quest.title}</b><span>{quest.category} · {quest.progress}/{quest.target} {quest.unit}{quest.progress >= quest.target ? ' · Completed' : ''}</span><div className="progress-track"><i style={{width:`${quest.progress/quest.target*100}%`}}/></div></div><button className="small-action" onClick={() => void updateQuest(quest.id)} disabled={quest.progress>=quest.target || questSaving}>{quest.progress>=quest.target ? 'Completed' : 'Add progress'}</button></div>) : <Empty icon={<Flag/>} title="Your quest board is quiet." detail={demo ? "Create a sample quest to explore how progress works." : "Create your first personal quest. It will be saved to your account."} action="Create your first quest" onAction={() => setShowQuestForm(true)}/>}</div>{showQuestForm && <div className="modal-backdrop"><form className="task-form panel quest-form" onSubmit={createQuest}><button type="button" className="close-form" onClick={() => setShowQuestForm(false)}><X/></button><div className="eyebrow">GROWTH WORLD · NEW QUEST</div><h2>Create a quest</h2><label>Quest title<input value={questTitle} onChange={event=>setQuestTitle(event.target.value)} placeholder="e.g. Practise guitar" maxLength={100} required/></label><label>Realm / category<select value={questCategory} onChange={event=>setQuestCategory(event.target.value)}><option>Knowledge</option><option>Social</option><option>Adventure</option><option>Wellness</option><option>Skill</option></select></label><div className="time-fields"><label>Target count<input type="number" min="1" max="1000" value={questTarget} onChange={event=>setQuestTarget(event.target.value)} required/></label><label>Unit<input value={questUnit} onChange={event=>setQuestUnit(event.target.value)} placeholder="e.g. pages, sessions" maxLength={30} required/></label></div><p className="override-explainer">Progress is saved to your account. Completing a quest earns 25 XP; every 100 XP advances your level.</p><button className="primary" type="submit" disabled={questSaving}>{questSaving ? 'Saving quest…' : 'Save quest'} <Plus size={16}/></button></form></div>}</div>}
-        {screen === 'squad' && currentUser && <SquadCenter user={currentUser}/>} 
+        {screen === 'squad' && currentUser && <SquadCenter user={currentUser} shareDisplayName={privacyShareDisplayName}/>} 
         {screen === 'insights' && <div className="content"><div className="page-heading"><div className="eyebrow">LOOK HOW FAR YOU'VE COME</div><h1>Insights</h1><p>Your real activity over the last seven days.</p></div><div className="stat-grid"><Stat icon={<Target/>} label="Tasks completed · 7 days" value={insightsLoading ? '…' : `${weeklyInsights.reduce((sum, day) => sum + day.completedTasks, 0)}`} sub={demo ? 'Illustrative demo activity' : `${weeklyInsights.reduce((sum, day) => sum + day.totalTasks, 0)} scheduled tasks found`}/><Stat icon={<Flame/>} label="Habit check-ins · 7 days" value={insightsLoading ? '…' : `${weeklyInsights.reduce((sum, day) => sum + day.habitCheckins, 0)}`} sub={demo ? 'Illustrative demo activity' : 'Saved daily habit completions'}/><Stat icon={<Flame/>} label="Current streak" value={demo ? '3 days' : `${currentStreak} days`} sub={demo ? 'Illustrative demo streak' : 'Consecutive days with a habit check-in'}/><Stat icon={<Trophy/>} label="Longest streak" value={demo ? '7 days' : `${longestStreak} days`} sub={demo ? 'Illustrative demo record' : 'Your best consecutive run'}/><Stat icon={<Trophy/>} label="Journey XP" value={demo ? '840 sample XP' : `${xpTotal} XP`} sub={demo ? 'Illustrative demo data' : `Level ${level} · Saved to your account`}/></div><div className="panel chart-panel"><PanelTitle icon={<BarChart3/>} title="Daily task completion · last 7 days"/>{insightsLoading ? <div className="empty-state"><b>Loading your activity…</b></div> : weeklyInsights.some(day => day.totalTasks > 0) ? <><div className="bars">{weeklyInsights.map(day => { const rate = day.totalTasks ? Math.round(day.completedTasks / day.totalTasks * 100) : 0; return <div className="bar-column" key={day.dateKey}><div className="bar-track" title={`${day.completedTasks} of ${day.totalTasks} tasks completed`}><i style={{height:`${rate}%`}}/></div><small>{day.label}</small></div> })}</div><div className="panel-footnote">Bars show the share of scheduled tasks marked Completed each day.</div></> : <div className="empty-state"><div className="empty-icon"><BarChart3/></div><b>No timetable activity yet.</b><p>Save a daily timetable and update task statuses to see your progress here.</p></div>}</div><div className="panel chart-panel"><PanelTitle icon={<Sprout/>} title="Daily habit check-ins · last 7 days"/>{insightsLoading ? <div className="empty-state"><b>Loading your habits…</b></div> : <div className="insight-days">{weeklyInsights.map(day => <div className="insight-day" key={day.dateKey}><span>{day.label}</span><b>{day.habitCheckins}</b><small>{day.habitCheckins === 1 ? 'habit' : 'habits'}</small></div>)}</div>}</div></div>}
       </main>
       {showSettings && <div className="modal-backdrop"><section className="task-form panel settings-form" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <button type="button" className="close-form" onClick={() => setShowSettings(false)} aria-label="Close settings"><X/></button>
         <div className="eyebrow">YOUR ACCOUNT</div><h2>Profile settings</h2>
         <div className="profile-settings"><div className="email-verification"><div><b>Email verification</b><span className={emailVerified ? "verification-status is-verified" : "verification-status"}>{emailVerified ? "Verified" : "Not verified"}</span></div><div className="verification-actions"><button type="button" className="secondary" onClick={() => void resendVerificationEmail()} disabled={!currentUser || emailVerified || verificationSending}>{verificationSending ? "Sending…" : "Resend email"}</button><button type="button" className="secondary" onClick={() => void refreshVerificationStatus()} disabled={!currentUser}>Refresh status</button></div></div><label>Display name<input type="text" value={profileName} onChange={event => setProfileName(event.target.value)} minLength={2} maxLength={40} placeholder="Your display name"/></label><label>Email address<input type="email" value={currentUser?.email || ""} readOnly disabled/></label><button type="button" className="secondary" onClick={() => void saveProfile()} disabled={profileSaving || !currentUser || profileName.trim().length < 2}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
+        <div className="settings-divider"/>
+        <div className="eyebrow">EMAIL</div><h2>Change email address</h2>
+        <p className="override-explainer">We’ll send a confirmation link to your new address. Your sign-in email stays the same until you confirm it.</p>
+        <div className="profile-settings">
+          <label>New email address<input type="email" autoComplete="email" value={emailChangeInput} onChange={event => setEmailChangeInput(event.target.value)} placeholder="new-email@example.com"/></label>
+          <label>Current password<input type="password" autoComplete="current-password" value={emailChangePassword} onChange={event => setEmailChangePassword(event.target.value)} placeholder="Confirm it's you"/></label>
+          <button type="button" className="secondary" onClick={() => void changeAccountEmail()} disabled={emailChanging || !emailChangeInput.trim() || !emailChangePassword}>{emailChanging ? 'Sending confirmation…' : 'Send confirmation link'}</button>
+        </div>
         <div className="settings-divider"/>
         <div className="eyebrow">ACCOUNT SECURITY</div><h2>Change password</h2>
         <div className="profile-settings password-settings">
@@ -863,6 +993,11 @@ function App() {
           <label>Confirm new password<input type="password" autoComplete="new-password" minLength={8} value={confirmNewPasswordInput} onChange={event => setConfirmNewPasswordInput(event.target.value)} placeholder="Enter the new password again"/></label>
           <button type="button" className="secondary" onClick={() => void changeAccountPassword()} disabled={passwordSaving || !currentPasswordInput || newPasswordInput.length < 8 || !confirmNewPasswordInput}>{passwordSaving ? "Updating…" : "Update password"}</button>
         </div>
+        <div className="settings-divider"/>
+        <div className="settings-divider"/>
+        <div className="eyebrow">PRIVACY CONTROLS</div><h2>Manage your data</h2>
+        <div className="privacy-control-row"><div><b>Show my display name in Squads</b><p>When off, squad members see “DAYLOCK Member” instead of your profile name. Your timetables, notes and email remain private.</p></div><label className="privacy-switch"><input type="checkbox" checked={privacyShareDisplayName} disabled={privacySaving || !currentUser} onChange={event => void savePrivacyPreference(event.target.checked)}/><span>{privacySaving ? 'Saving…' : privacyShareDisplayName ? 'On' : 'Off'}</span></label></div>
+        <div className="privacy-control-row"><div><b>Download a copy of my data</b><p>Export your timetables and audit history, habits, quests, XP activity, squad memberships and reminder preferences as JSON. Push tokens and passwords are excluded.</p></div><button type="button" className="secondary" onClick={() => void exportAccountData()} disabled={exportingData || !currentUser}>{exportingData ? 'Preparing…' : 'Export my data'}</button></div>
         <div className="settings-divider"/>
         <div className="eyebrow">PERSONALISE YOUR DAYLOCK</div><h2 id="settings-title">Reminder settings</h2>
         <p className="override-explainer">Background reminders can arrive while DAYLOCK is closed on this device. Times use your device local timezone.</p>
@@ -903,7 +1038,7 @@ function squadErrorMessage(error: unknown) {
   if (code.includes('unavailable') || code.includes('network')) return 'Could not reach Firestore. Check your connection and try again.'
   return (error as { message?: string })?.message || 'Something went wrong. Please try again.'
 }
-function SquadCenter({ user }: { user: User }) {
+function SquadCenter({ user, shareDisplayName }: { user: User; shareDisplayName: boolean }) {
   const [squads,setSquads]=useState<SquadSummary[]>([])
   const [selected,setSelected]=useState<SquadSummary|null>(null)
   const [members,setMembers]=useState<SquadMember[]>([])
@@ -921,6 +1056,7 @@ function SquadCenter({ user }: { user: User }) {
   const [challengeTarget,setChallengeTarget]=useState('10')
   const [challengeUnit,setChallengeUnit]=useState('points')
   const displayName=user.displayName?.trim()||user.email?.split('@')[0]||'DAYLOCK Member'
+  const visibleDisplayName=shareDisplayName?displayName:'DAYLOCK Member'
 
   const loadSquads=async()=>{
     setLoading(true);setError('')
@@ -964,12 +1100,12 @@ function SquadCenter({ user }: { user: User }) {
       const code=makeInviteCode(),squadRef=doc(collection(db,'squads')),memberRef=doc(db,'squads',squadRef.id,'members',user.uid),userIndexRef=doc(db,'users',user.uid,'squads',squadRef.id),inviteRef=doc(db,'squadInvites',code)
       const batch=writeBatch(db)
       batch.set(squadRef,{name,createdBy:user.uid,inviteCode:code,createdAt:serverTimestamp()})
-      batch.set(memberRef,{uid:user.uid,displayName,role:'owner',joinedAt:serverTimestamp()})
+      batch.set(memberRef,{uid:user.uid,displayName:visibleDisplayName,role:'owner',joinedAt:serverTimestamp()})
       batch.set(userIndexRef,{squadId:squadRef.id,name,role:'owner',joinedAt:serverTimestamp()})
       batch.set(inviteRef,{squadId:squadRef.id,squadName:name,createdBy:user.uid,active:true,createdAt:serverTimestamp()})
       await batch.commit()
       const item={id:squadRef.id,name,role:'owner'}
-      setSquads(items=>[item,...items]);setSelected(item);setMembers([{uid:user.uid,displayName,role:'owner'}]);setInviteCode(code);setChallenges([]);setSquadName('');setMode(null)
+      setSquads(items=>[item,...items]);setSelected(item);setMembers([{uid:user.uid,displayName:visibleDisplayName,role:'owner'}]);setInviteCode(code);setChallenges([]);setSquadName('');setMode(null)
       setMessage('Your private squad is ready. Share this invite code with friends.')
     }catch(e){setError(squadErrorMessage(e))}
     finally{setBusy(false)}
@@ -985,7 +1121,7 @@ function SquadCenter({ user }: { user: User }) {
       const invite=inviteSnap.data(),squadId=String(invite.squadId||''),memberRef=doc(db,'squads',squadId,'members',user.uid)
       if((await getDoc(memberRef)).exists())throw new Error('You are already a member of this squad.')
       const name=String(invite.squadName||'DAYLOCK Squad'),batch=writeBatch(db)
-      batch.set(memberRef,{uid:user.uid,displayName,role:'member',inviteCode:code,joinedAt:serverTimestamp()})
+      batch.set(memberRef,{uid:user.uid,displayName:visibleDisplayName,role:'member',inviteCode:code,joinedAt:serverTimestamp()})
       batch.set(doc(db,'users',user.uid,'squads',squadId),{squadId,name,role:'member',joinedAt:serverTimestamp()})
       await batch.commit()
       const item={id:squadId,name,role:'member'}
