@@ -3,6 +3,8 @@ import type { FormEvent, ReactNode } from 'react'
 import type { User } from 'firebase/auth'
 import {
   createUserWithEmailAndPassword,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
   onAuthStateChanged,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
@@ -131,6 +133,10 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [profileName, setProfileName] = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deletePassword, setDeletePassword] = useState('')
+  const [deletePhrase, setDeletePhrase] = useState('')
+  const [accountDeleting, setAccountDeleting] = useState(false)
   const [reminders, setReminders] = useState<ReminderSettings>(defaultReminders)
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | 'unsupported'>('default')
   const completed = tasks.filter(task => task.status === 'Completed').length
@@ -174,6 +180,44 @@ function App() {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not update your profile.')
     } finally { setProfileSaving(false) }
+  }
+
+  const cancelAccountDeletion = () => {
+    setShowDeleteConfirm(false)
+    setDeletePassword('')
+    setDeletePhrase('')
+  }
+
+  const deleteAccount = async () => {
+    if (!currentUser?.email) { notify('A signed-in email account is required for deletion.'); return }
+    if (deletePhrase !== 'DELETE' || !deletePassword) { notify('Enter your password and type DELETE to confirm.'); return }
+    setAccountDeleting(true)
+    try {
+      const credential = EmailAuthProvider.credential(currentUser.email, deletePassword)
+      await reauthenticateWithCredential(currentUser, credential)
+      const idToken = await currentUser.getIdToken(true)
+      const response = await fetch('/api/account/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + idToken },
+        body: JSON.stringify({ confirmation: 'DELETE' }),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'Account deletion could not be completed.')
+      try { localStorage.removeItem('daylock-reminders-' + currentUser.uid) } catch { /* Local storage may be unavailable. */ }
+      await signOut(auth)
+      setCurrentUser(null)
+      setDemo(false)
+      setEnteredApp(false)
+      setScreen('home')
+      setShowSettings(false)
+      notify('Your DAYLOCK account and saved data have been deleted.')
+    } catch (error) {
+      const code = (error as { code?: string })?.code || ''
+      const message = code.includes('auth/wrong-password') || code.includes('auth/invalid-credential')
+        ? 'That password was not accepted. Check it and try again.'
+        : error instanceof Error ? error.message : 'Account deletion failed. Please try again.'
+      notify(message)
+    } finally { setAccountDeleting(false) }
   }
 
   const reminderStorageKey = 'daylock-reminders-' + (currentUser?.uid || 'guest')
@@ -752,6 +796,17 @@ function App() {
         <div className="notification-permission"><div><b>Browser notifications</b><span>{notificationPermission === "granted" ? "Enabled" : notificationPermission === "denied" ? "Blocked in browser settings" : notificationPermission === "unsupported" ? "Not supported by this browser" : "Permission not enabled"}</span></div><button type="button" className="secondary" onClick={() => void enableBrowserNotifications()} disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}>{notificationPermission === "granted" ? "Enabled" : "Enable"}</button></div>
         <div className="reminder-list">{(Object.keys(reminders) as ReminderKey[]).map(key => <div className="reminder-setting" key={key}><label className="reminder-toggle"><input type="checkbox" checked={reminders[key].enabled} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], enabled: event.target.checked } }))}/><span><b>{reminderLabels[key].title}</b><small>{reminderLabels[key].detail}</small></span></label><input aria-label={reminderLabels[key].title + " time"} type="time" value={reminders[key].time} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], time: event.target.value } }))}/></div>)}</div>
         <button className="primary" type="button" onClick={() => void saveReminderSettings()}>Save & enable background reminders <Check size={15}/></button>
+        <div className="settings-divider"/>
+        <div className="danger-zone">
+          <div className="eyebrow">DANGER ZONE</div>
+          <h2>Delete your account</h2>
+          <p>This permanently deletes your DAYLOCK profile, timetables, habits, quests, XP history, reminders, and squad membership. Squads you own will also be removed for their members. This cannot be undone.</p>
+          {!showDeleteConfirm ? <button type="button" className="danger-button" onClick={() => setShowDeleteConfirm(true)}>Delete my account</button> : <div className="delete-confirm-panel">
+            <label>Current password<input type="password" autoComplete="current-password" value={deletePassword} onChange={event => setDeletePassword(event.target.value)} placeholder="Enter your password"/></label>
+            <label>Type DELETE to confirm<input type="text" value={deletePhrase} onChange={event => setDeletePhrase(event.target.value)} placeholder="DELETE" autoComplete="off"/></label>
+            <div className="delete-actions"><button type="button" className="secondary" onClick={cancelAccountDeletion} disabled={accountDeleting}>Cancel</button><button type="button" className="danger-button" onClick={() => void deleteAccount()} disabled={accountDeleting || !deletePassword || deletePhrase !== 'DELETE'}>{accountDeleting ? 'Deleting…' : 'Permanently delete'}</button></div>
+          </div>}
+        </div>
       </section></div>}
       {toast && <div className="toast"><Check size={16}/>{toast}</div>}
       {mobileMenu && <button className="scrim" onClick={() => setMobileMenu(false)} aria-label="Close navigation"/>}
