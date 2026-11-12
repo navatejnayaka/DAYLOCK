@@ -16,7 +16,7 @@ import {
   verifyBeforeUpdateEmail,
 } from 'firebase/auth'
 import { auth, authPersistenceReady, getDaylockMessaging, vapidPublicKey } from './firebase'
-import { getToken } from 'firebase/messaging'
+import { deleteToken, getToken } from 'firebase/messaging'
 import { addDoc, collection, doc, getDoc, getDocs, serverTimestamp, writeBatch, setDoc } from 'firebase/firestore'
 import { db } from './firebase'
 import {
@@ -36,6 +36,7 @@ type Habit = { id: string; title: string; category: string }
 type InsightDay = { dateKey: string; label: string; totalTasks: number; completedTasks: number; habitCheckins: number }
 type ReminderKey = 'planning' | 'hydration' | 'meal' | 'habit'
 type ReminderSettings = Record<ReminderKey, { enabled: boolean; time: string }>
+type ReminderDevice = { id: string; label: string; timezone: string; updatedAt: string | null; enabledReminders: string[] }
 const defaultReminders: ReminderSettings = { planning: { enabled: true, time: '21:30' }, hydration: { enabled: false, time: '11:00' }, meal: { enabled: false, time: '13:00' }, habit: { enabled: false, time: '19:00' } }
 const reminderLabels: Record<ReminderKey, { title: string; detail: string; message: string }> = {
   planning: { title: 'Plan tomorrow', detail: 'A gentle evening planning reminder', message: 'Take a few minutes to plan tomorrow in DAYLOCK.' },
@@ -155,6 +156,10 @@ function App() {
   const [accountDeleting, setAccountDeleting] = useState(false)
   const [reminders, setReminders] = useState<ReminderSettings>(defaultReminders)
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | 'unsupported'>('default')
+  const [reminderDevices, setReminderDevices] = useState<ReminderDevice[]>([])
+  const [reminderDevicesLoading, setReminderDevicesLoading] = useState(false)
+  const [removingReminderDevice, setRemovingReminderDevice] = useState('')
+  const [currentReminderDeviceId, setCurrentReminderDeviceId] = useState('')
   const completed = tasks.filter(task => task.status === 'Completed').length
   const percent = tasks.length ? Math.round(completed / tasks.length * 100) : 0
   const today = useMemo(() => new Intl.DateTimeFormat('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date()), [])
@@ -438,6 +443,67 @@ function App() {
     const timer = window.setInterval(checkReminders, 15000)
     return () => window.clearInterval(timer)
   }, [enteredApp, demo, currentUser?.uid, reminders])
+
+  const reminderDeviceHash = async (token: string) => {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  }
+
+  const getCurrentReminderToken = async () => {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !('serviceWorker' in navigator)) return null
+    const messaging = await getDaylockMessaging()
+    if (!messaging) return null
+    const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js')
+    return getToken(messaging, { vapidKey: vapidPublicKey, serviceWorkerRegistration: registration })
+  }
+
+  const loadReminderDevices = async () => {
+    if (!currentUser) return
+    setReminderDevicesLoading(true)
+    try {
+      const [idToken, token] = await Promise.all([currentUser.getIdToken(), getCurrentReminderToken().catch(() => null)])
+      const response = await fetch('/api/reminders/list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + idToken },
+        body: JSON.stringify({}),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'Could not load notification devices.')
+      setReminderDevices(Array.isArray(result.devices) ? result.devices : [])
+      setCurrentReminderDeviceId(token ? await reminderDeviceHash(token) : '')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not load notification devices.')
+    } finally { setReminderDevicesLoading(false) }
+  }
+
+  const removeReminderDevice = async (deviceId: string) => {
+    if (!currentUser || !deviceId) return
+    setRemovingReminderDevice(deviceId)
+    try {
+      const idToken = await currentUser.getIdToken()
+      const response = await fetch('/api/reminders/remove', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + idToken },
+        body: JSON.stringify({ deviceId }),
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'Could not remove this device.')
+      if (deviceId === currentReminderDeviceId) {
+        const messaging = await getDaylockMessaging()
+        if (messaging) await deleteToken(messaging).catch(() => false)
+        setCurrentReminderDeviceId('')
+      }
+      setReminderDevices(items => items.filter(item => item.id !== deviceId))
+      notify('Notification device removed. It will no longer receive DAYLOCK reminders.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not remove this device.')
+    } finally { setRemovingReminderDevice('') }
+  }
+
+  useEffect(() => {
+    if (showSettings && currentUser && !demo) void loadReminderDevices()
+    if (!showSettings) setReminderDevices([])
+  }, [showSettings, currentUser?.uid, demo])
 
   const saveReminderSettings = async () => {
     if (!currentUser) { notify('Sign in to sync reminders.'); return }
@@ -1003,6 +1069,9 @@ function App() {
         <p className="override-explainer">Background reminders can arrive while DAYLOCK is closed on this device. Times use your device local timezone.</p>
         <div className="notification-permission"><div><b>Browser notifications</b><span>{notificationPermission === "granted" ? "Enabled" : notificationPermission === "denied" ? "Blocked in browser settings" : notificationPermission === "unsupported" ? "Not supported by this browser" : "Permission not enabled"}</span></div><button type="button" className="secondary" onClick={() => void enableBrowserNotifications()} disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}>{notificationPermission === "granted" ? "Enabled" : "Enable"}</button></div>
         <div className="reminder-list">{(Object.keys(reminders) as ReminderKey[]).map(key => <div className="reminder-setting" key={key}><label className="reminder-toggle"><input type="checkbox" checked={reminders[key].enabled} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], enabled: event.target.checked } }))}/><span><b>{reminderLabels[key].title}</b><small>{reminderLabels[key].detail}</small></span></label><input aria-label={reminderLabels[key].title + " time"} type="time" value={reminders[key].time} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], time: event.target.value } }))}/></div>)}</div>
+        <div className="settings-divider"/>
+        <div className="device-manager-heading"><div><div className="eyebrow">NOTIFICATION MANAGEMENT</div><h3>Registered devices</h3></div><button type="button" className="secondary" onClick={() => void loadReminderDevices()} disabled={reminderDevicesLoading}>{reminderDevicesLoading ? 'Refreshing…' : 'Refresh'}</button></div>
+        {reminderDevicesLoading ? <p className="override-explainer">Loading your devices…</p> : reminderDevices.length === 0 ? <p className="override-explainer">No background notification devices are registered yet. Save your reminder settings to register this browser.</p> : <div className="reminder-devices">{reminderDevices.map(device => <div className="reminder-device" key={device.id}><div><b>{device.id === currentReminderDeviceId ? 'This device' : device.label}</b><span>{device.timezone} · {device.enabledReminders.length ? device.enabledReminders.join(', ') : 'No reminders enabled'}</span><small>{device.updatedAt ? 'Last updated ' + new Date(device.updatedAt).toLocaleString() : 'Registration date unavailable'}</small></div><button type="button" className="secondary" onClick={() => void removeReminderDevice(device.id)} disabled={removingReminderDevice === device.id}>{removingReminderDevice === device.id ? 'Removing…' : 'Remove'}</button></div>)}</div>}
         <button className="primary" type="button" onClick={() => void saveReminderSettings()}>Save & enable background reminders <Check size={15}/></button>
         <div className="settings-divider"/>
         <div className="danger-zone">
