@@ -77,6 +77,35 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    match /users/{userId}/quests/{questId} {
+      allow get, list: if signedIn() && userId == uid();
+      allow create: if signedIn()
+        && userId == uid()
+        && request.resource.data.keys().hasOnly(['title', 'category', 'progress', 'target', 'unit', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasAll(['title', 'category', 'progress', 'target', 'unit', 'createdAt', 'updatedAt'])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 1
+        && request.resource.data.title.size() <= 100
+        && request.resource.data.category in ['Knowledge', 'Social', 'Adventure', 'Wellness', 'Skill']
+        && request.resource.data.progress == 0
+        && request.resource.data.target is int
+        && request.resource.data.target >= 1
+        && request.resource.data.target <= 1000
+        && request.resource.data.unit is string
+        && request.resource.data.unit.size() >= 1
+        && request.resource.data.unit.size() <= 30
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if signedIn()
+        && userId == uid()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['progress', 'updatedAt'])
+        && request.resource.data.progress is int
+        && request.resource.data.progress >= resource.data.progress
+        && request.resource.data.progress <= resource.data.target
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
     match /users/{userId}/schedules/{dateKey} {
       // Timetable reads are private to the account owner.
       // All schedule writes go through the authenticated Cloudflare Worker,
