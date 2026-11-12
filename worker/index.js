@@ -290,6 +290,123 @@ async function saveSchedule(request, env, uid) {
   }
 }
 
+
+async function emergencyOverride(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    return json({ error: "The schedule server is not configured yet." }, 503);
+  }
+
+  let body;
+  try {
+    if (Number(request.headers.get("content-length") || 0) > 48_000) return json({ error: "Request is too large." }, 413);
+    body = await request.json();
+  } catch {
+    return json({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  const { dateKey, timezone, tasks: rawTasks, reason } = body || {};
+  if (!isValidDateKey(dateKey)) return json({ error: "Invalid timetable date." }, 400);
+  if (typeof timezone !== "string" || timezone.length > 80) return json({ error: "Invalid timezone." }, 400);
+  if (typeof reason !== "string" || reason.trim().length < 10 || reason.trim().length > 500) {
+    return json({ error: "Please give an emergency reason between 10 and 500 characters." }, 400);
+  }
+
+  let today;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    today = localDateKey(timezone);
+  } catch {
+    return json({ error: "The selected timezone is not valid." }, 400);
+  }
+  if (dateKey !== today) return json({ error: "Emergency overrides are only available for today's sealed timetable." }, 423);
+
+  let tasks;
+  try {
+    tasks = validateTasks(rawTasks);
+  } catch (error) {
+    return json({ error: error.message || "Invalid timetable tasks." }, 400);
+  }
+
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) {
+      return json({ error: "The schedule server credential is not configured for DAYLOCK." }, 503);
+    }
+  } catch {
+    return json({ error: "The schedule server credential is not valid JSON." }, 503);
+  }
+
+  try {
+    const accessToken = await getGoogleAccessToken(serviceAccount);
+    const documentName = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/schedules/${dateKey}`;
+    const documentUrl = `https://firestore.googleapis.com/v1/${documentName}`;
+    const readResponse = await firestoreRequest(documentUrl, accessToken);
+    if (readResponse.status === 404) return json({ error: "There is no saved timetable to amend for today." }, 404);
+    if (!readResponse.ok) return json({ error: "Could not load today's timetable." }, 502);
+
+    const existing = await readResponse.json();
+    const before = decodeFields(existing.fields);
+    if (before.timezone !== timezone) return json({ error: "This timetable is tied to a different timezone." }, 409);
+    if (localDateKey(before.timezone) !== dateKey) return json({ error: "This timetable is no longer today's schedule." }, 423);
+
+    const beforeTasks = Array.isArray(before.tasks) ? before.tasks : [];
+    if (beforeTasks.length === tasks.length && beforeTasks.every((task, index) => sameTaskDetails(task, tasks[index]))) {
+      return json({ error: "No task details changed. Make an actual emergency amendment before submitting." }, 400);
+    }
+
+    const timestamp = new Date().toISOString();
+    const auditId = crypto.randomUUID();
+    const auditName = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/schedules/${dateKey}/audit/${auditId}`;
+    const commitUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:commit`;
+    const writes = [
+      {
+        update: {
+          name: documentName,
+          fields: encodeFields({ tasks, updatedAt: timestamp }),
+        },
+        updateMask: { fieldPaths: ["tasks", "updatedAt"] },
+        currentDocument: { updateTime: existing.updateTime },
+      },
+      {
+        update: {
+          name: auditName,
+          fields: encodeFields({
+            auditId,
+            action: "emergency_override",
+            dateKey,
+            timezone,
+            actorUid: uid,
+            reason: reason.trim(),
+            occurredAt: timestamp,
+            beforeTasks,
+            afterTasks: tasks,
+          }),
+        },
+        currentDocument: { exists: false },
+      },
+    ];
+
+    const commitResponse = await firestoreRequest(commitUrl, accessToken, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ writes }),
+    });
+    if (!commitResponse.ok) {
+      const detail = await commitResponse.text();
+      console.error("DAYLOCK override commit failed", commitResponse.status, detail.slice(0, 1200));
+      return json({ error: commitResponse.status === 409 || commitResponse.status === 400
+        ? "The timetable changed while the override was being submitted. Refresh and try again."
+        : "The emergency amendment could not be committed. Please retry." }, 409);
+    }
+
+    return json({ ok: true, auditId, dateKey, tasks, occurredAt: timestamp });
+  } catch (error) {
+    console.error("DAYLOCK emergency override failed", error);
+    return json({ error: "The emergency amendment service failed. Please retry." }, 502);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -299,7 +416,7 @@ export default {
         return json({ error: "Method not allowed." }, 405);
       }
       if (url.pathname === "/api/health" && request.method === "POST") return json({ ok: true });
-      if (url.pathname !== "/api/schedules/save") return json({ error: "Not found." }, 404);
+      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
@@ -309,7 +426,9 @@ export default {
 
       try {
         const uid = await verifyFirebaseIdToken(match[1]);
-        return await saveSchedule(request, env, uid);
+        return url.pathname === "/api/schedules/override"
+          ? await emergencyOverride(request, env, uid)
+          : await saveSchedule(request, env, uid);
       } catch (error) {
         console.warn("DAYLOCK request authentication failed", error);
         return json({ error: "Your session could not be verified. Sign in again and retry." }, 401);
