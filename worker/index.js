@@ -734,7 +734,7 @@ async function runScheduledReminders(env) {
   try {
     const access = await getGoogleAccessToken(serviceAccount);
     const queryUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:runQuery`;
-    const query = { structuredQuery: { from: [{ collectionId: "reminderSettings", allDescendants: true }], where: { fieldFilter: { field: { fieldPath: "token" }, op: "IS_NOT_NULL", value: { nullValue: null } } }, limit: 500 } };
+    const query = { structuredQuery: { from: [{ collectionId: "reminderSettings", allDescendants: true }], limit: 500 } };
     const response = await firestoreRequest(queryUrl, access, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(query) });
     if (!response.ok) { console.error("Reminder query failed", response.status, (await response.text()).slice(0,500)); return; }
     const rows = await response.json();
