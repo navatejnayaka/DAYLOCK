@@ -9,7 +9,8 @@ import {
   signOut,
   updateProfile,
 } from 'firebase/auth'
-import { auth, authPersistenceReady } from './firebase'
+import { auth, authPersistenceReady, getDaylockMessaging, vapidPublicKey } from './firebase'
+import { getToken } from 'firebase/messaging'
 import { addDoc, collection, doc, getDoc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore'
 import { db } from './firebase'
 import {
@@ -194,11 +195,33 @@ function App() {
     return () => window.clearInterval(timer)
   }, [enteredApp, demo, currentUser?.uid, reminders])
 
+  const saveReminderSettings = async () => {
+    if (!currentUser) { notify('Sign in to sync reminders.'); return }
+    try {
+      if (!('Notification' in window)) throw new Error('Notifications are not supported in this browser.')
+      if (Notification.permission !== 'granted') throw new Error('Enable notification permission first.')
+      const messaging = await getDaylockMessaging()
+      if (!messaging) throw new Error('Push notifications are not supported in this browser.')
+      const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js')
+      const token = await getToken(messaging, { vapidKey: vapidPublicKey, serviceWorkerRegistration: registration })
+      if (!token) throw new Error('Could not register this device for push notifications.')
+      const idToken = await currentUser.getIdToken()
+      const response = await fetch('/api/reminders/register', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ token, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', reminders })
+      })
+      const result = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(result.error || 'Could not save background reminders.')
+      notify('Background reminders saved for this device.')
+      setShowSettings(false)
+    } catch (error) { notify(error instanceof Error ? error.message : 'Could not enable background reminders.') }
+  }
   const enableBrowserNotifications = async () => {
     if (!('Notification' in window)) { setNotificationPermission('unsupported'); return }
     const permission = await Notification.requestPermission()
     setNotificationPermission(permission)
-    notify(permission === 'granted' ? 'Browser notifications enabled.' : permission === 'denied' ? 'Notifications are blocked in your browser settings.' : 'Notification permission was not granted.')
+    notify(permission === 'granted' ? 'Permission enabled. Save settings to activate background reminders.' : permission === 'denied' ? 'Notifications are blocked in your browser settings.' : 'Notification permission was not granted.')
   }
   const authenticate = async (mode: AuthMode, email: string, password: string, displayName: string) => {
     await authPersistenceReady
@@ -703,10 +726,10 @@ function App() {
       {showSettings && <div className="modal-backdrop"><section className="task-form panel settings-form" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <button type="button" className="close-form" onClick={() => setShowSettings(false)} aria-label="Close settings"><X/></button>
         <div className="eyebrow">PERSONALISE YOUR DAYLOCK</div><h2 id="settings-title">Reminder settings</h2>
-        <p className="override-explainer">Reminders run while DAYLOCK is open in this browser. Times use your device local timezone. Settings are saved on this device.</p>
+        <p className="override-explainer">Background reminders can arrive while DAYLOCK is closed on this device. Times use your device local timezone.</p>
         <div className="notification-permission"><div><b>Browser notifications</b><span>{notificationPermission === "granted" ? "Enabled" : notificationPermission === "denied" ? "Blocked in browser settings" : notificationPermission === "unsupported" ? "Not supported by this browser" : "Permission not enabled"}</span></div><button type="button" className="secondary" onClick={() => void enableBrowserNotifications()} disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}>{notificationPermission === "granted" ? "Enabled" : "Enable"}</button></div>
         <div className="reminder-list">{(Object.keys(reminders) as ReminderKey[]).map(key => <div className="reminder-setting" key={key}><label className="reminder-toggle"><input type="checkbox" checked={reminders[key].enabled} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], enabled: event.target.checked } }))}/><span><b>{reminderLabels[key].title}</b><small>{reminderLabels[key].detail}</small></span></label><input aria-label={reminderLabels[key].title + " time"} type="time" value={reminders[key].time} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], time: event.target.value } }))}/></div>)}</div>
-        <button className="primary" type="button" onClick={() => setShowSettings(false)}>Save reminder settings <Check size={15}/></button>
+        <button className="primary" type="button" onClick={() => void saveReminderSettings()}>Save & enable background reminders <Check size={15}/></button>
       </section></div>}
       {toast && <div className="toast"><Check size={16}/>{toast}</div>}
       {mobileMenu && <button className="scrim" onClick={() => setMobileMenu(false)} aria-label="Close navigation"/>}
