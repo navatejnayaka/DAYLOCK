@@ -96,14 +96,18 @@ service cloud.firestore {
         && request.resource.data.unit.size() <= 30
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
-      allow update: if signedIn()
-        && userId == uid()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['progress', 'updatedAt'])
-        && request.resource.data.progress is int
-        && request.resource.data.progress >= resource.data.progress
-        && request.resource.data.progress <= resource.data.target
-        && request.resource.data.updatedAt == request.time;
-      allow delete: if false;
+      // Progress changes and completion rewards are written only by the authenticated Worker.
+      allow update, delete: if false;
+    }
+
+    match /users/{userId}/progress/{progressId} {
+      allow get, list: if signedIn() && userId == uid();
+      allow create, update, delete: if false;
+    }
+
+    match /users/{userId}/xpEvents/{eventId} {
+      allow get, list: if signedIn() && userId == uid();
+      allow create, update, delete: if false;
     }
 
     match /users/{userId}/schedules/{dateKey} {
