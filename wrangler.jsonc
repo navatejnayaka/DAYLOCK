@@ -6,9 +6,16 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": [
+      "/api/*"
+    ]
   },
   "observability": {
     "enabled": true
+  },
+  "triggers": {
+    "crons": [
+      "* * * * *"
+    ]
   }
 }
