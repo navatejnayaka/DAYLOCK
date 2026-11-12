@@ -689,9 +689,6 @@ const REMINDER_COPY = {
 };
 
 
-const FIREBASE_AUTH_DELETE_URL = `https://identitytoolkit.googleapis.com/v1/projects/${PROJECT_ID}/accounts:delete`;
-const GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
-
 async function listFirestoreCollection(access, collectionPath) {
   const results = [];
   let pageToken = "";
@@ -767,7 +764,7 @@ async function deleteAccountData(request, env, uid) {
   }
 
   try {
-    const access = await getGoogleAccessToken(serviceAccount, GOOGLE_CLOUD_PLATFORM_SCOPE);
+    const access = await getGoogleAccessToken(serviceAccount);
     const counter = { value: 0 };
     const base = `projects/${PROJECT_ID}/databases/(default)/documents`;
     const squads = await listFirestoreCollection(access, `${base}/squads`);
@@ -801,16 +798,6 @@ async function deleteAccountData(request, env, uid) {
 
     await deleteFirestoreTree(access, `${base}/users/${uid}`, counter);
 
-    const authResponse = await firestoreRequest(FIREBASE_AUTH_DELETE_URL, access, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ localId: uid }),
-    });
-    if (!authResponse.ok) {
-      const detail = (await authResponse.text()).slice(0, 500);
-      console.error("Firebase account deletion failed after data cleanup", authResponse.status, detail);
-      return json({ error: "Your DAYLOCK data was removed, but Firebase could not finish deleting the login. Contact support before creating another account." }, 502);
-    }
     return json({ ok: true, deletedRecords: counter.value });
   } catch (error) {
     console.error("Secure account deletion failed", error);
