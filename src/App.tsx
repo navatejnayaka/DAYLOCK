@@ -12,6 +12,7 @@ import {
   signInWithEmailAndPassword,
   signOut,
   updateProfile,
+  updatePassword,
 } from 'firebase/auth'
 import { auth, authPersistenceReady, getDaylockMessaging, vapidPublicKey } from './firebase'
 import { getToken } from 'firebase/messaging'
@@ -137,6 +138,10 @@ function App() {
   const [profileSaving, setProfileSaving] = useState(false)
   const [emailVerified, setEmailVerified] = useState(false)
   const [verificationSending, setVerificationSending] = useState(false)
+  const [currentPasswordInput, setCurrentPasswordInput] = useState('')
+  const [newPasswordInput, setNewPasswordInput] = useState('')
+  const [confirmNewPasswordInput, setConfirmNewPasswordInput] = useState('')
+  const [passwordSaving, setPasswordSaving] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deletePassword, setDeletePassword] = useState('')
   const [deletePhrase, setDeletePhrase] = useState('')
@@ -208,6 +213,28 @@ function App() {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not refresh verification status.')
     }
+  }
+
+  const changeAccountPassword = async () => {
+    if (!currentUser?.email) { notify('A signed-in email account is required.'); return }
+    if (newPasswordInput.length < 8) { notify('Your new password must contain at least 8 characters.'); return }
+    if (newPasswordInput !== confirmNewPasswordInput) { notify('The new passwords do not match.'); return }
+    if (currentPasswordInput === newPasswordInput) { notify('Choose a different password from your current one.'); return }
+    setPasswordSaving(true)
+    try {
+      const credential = EmailAuthProvider.credential(currentUser.email, currentPasswordInput)
+      await reauthenticateWithCredential(currentUser, credential)
+      await updatePassword(currentUser, newPasswordInput)
+      setCurrentPasswordInput('')
+      setNewPasswordInput('')
+      setConfirmNewPasswordInput('')
+      notify('Your password has been changed successfully.')
+    } catch (error) {
+      const code = (error as { code?: string })?.code || ''
+      notify(code.includes('auth/wrong-password') || code.includes('auth/invalid-credential')
+        ? 'Your current password is incorrect.'
+        : error instanceof Error ? error.message : 'Could not change your password.')
+    } finally { setPasswordSaving(false) }
   }
 
   const cancelAccountDeletion = () => {
@@ -828,6 +855,14 @@ function App() {
         <button type="button" className="close-form" onClick={() => setShowSettings(false)} aria-label="Close settings"><X/></button>
         <div className="eyebrow">YOUR ACCOUNT</div><h2>Profile settings</h2>
         <div className="profile-settings"><div className="email-verification"><div><b>Email verification</b><span className={emailVerified ? "verification-status is-verified" : "verification-status"}>{emailVerified ? "Verified" : "Not verified"}</span></div><div className="verification-actions"><button type="button" className="secondary" onClick={() => void resendVerificationEmail()} disabled={!currentUser || emailVerified || verificationSending}>{verificationSending ? "Sending…" : "Resend email"}</button><button type="button" className="secondary" onClick={() => void refreshVerificationStatus()} disabled={!currentUser}>Refresh status</button></div></div><label>Display name<input type="text" value={profileName} onChange={event => setProfileName(event.target.value)} minLength={2} maxLength={40} placeholder="Your display name"/></label><label>Email address<input type="email" value={currentUser?.email || ""} readOnly disabled/></label><button type="button" className="secondary" onClick={() => void saveProfile()} disabled={profileSaving || !currentUser || profileName.trim().length < 2}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
+        <div className="settings-divider"/>
+        <div className="eyebrow">ACCOUNT SECURITY</div><h2>Change password</h2>
+        <div className="profile-settings password-settings">
+          <label>Current password<input type="password" autoComplete="current-password" value={currentPasswordInput} onChange={event => setCurrentPasswordInput(event.target.value)} placeholder="Enter current password"/></label>
+          <label>New password<input type="password" autoComplete="new-password" minLength={8} value={newPasswordInput} onChange={event => setNewPasswordInput(event.target.value)} placeholder="At least 8 characters"/></label>
+          <label>Confirm new password<input type="password" autoComplete="new-password" minLength={8} value={confirmNewPasswordInput} onChange={event => setConfirmNewPasswordInput(event.target.value)} placeholder="Enter the new password again"/></label>
+          <button type="button" className="secondary" onClick={() => void changeAccountPassword()} disabled={passwordSaving || !currentPasswordInput || newPasswordInput.length < 8 || !confirmNewPasswordInput}>{passwordSaving ? "Updating…" : "Update password"}</button>
+        </div>
         <div className="settings-divider"/>
         <div className="eyebrow">PERSONALISE YOUR DAYLOCK</div><h2 id="settings-title">Reminder settings</h2>
         <p className="override-explainer">Background reminders can arrive while DAYLOCK is closed on this device. Times use your device local timezone.</p>
