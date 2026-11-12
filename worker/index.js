@@ -558,125 +558,92 @@ async function advanceQuest(request, env, uid) {
 
 
 async function completeHabit(request, env, uid) {
-  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    return json({ error: "The DAYLOCK habit service is not configured yet." }, 503);
-  }
-
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The DAYLOCK habit service is not configured yet." }, 503);
   let body;
   try {
-    if (Number(request.headers.get("content-length") || 0) > 4_000) return json({ error: "Request is too large." }, 413);
+    if (Number(request.headers.get("content-length") || 0) > 4000) return json({ error: "Request is too large." }, 413);
     body = await request.json();
-  } catch {
-    return json({ error: "Request body must be valid JSON." }, 400);
-  }
-
+  } catch { return json({ error: "Request body must be valid JSON." }, 400); }
   const { habitId, timezone } = body || {};
-  if (typeof habitId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(habitId)) {
-    return json({ error: "Invalid habit identifier." }, 400);
-  }
-  if (typeof timezone !== "string" || timezone.length > 80) {
-    return json({ error: "Choose a valid timezone." }, 400);
-  }
-
+  if (typeof habitId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(habitId)) return json({ error: "Invalid habit identifier." }, 400);
+  if (typeof timezone !== "string" || timezone.length > 80) return json({ error: "Choose a valid timezone." }, 400);
   let dateKey;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
-    dateKey = localDateKey(timezone);
-  } catch {
-    return json({ error: "The selected timezone is not valid." }, 400);
-  }
-
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); dateKey = localDateKey(timezone); }
+  catch { return json({ error: "The selected timezone is not valid." }, 400); }
   let serviceAccount;
   try {
     serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) {
-      return json({ error: "The DAYLOCK server credential is not configured correctly." }, 503);
-    }
-  } catch {
-    return json({ error: "The DAYLOCK server credential is not valid JSON." }, 503);
-  }
+    if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) return json({ error: "The DAYLOCK server credential is not configured correctly." }, 503);
+  } catch { return json({ error: "The DAYLOCK server credential is not valid JSON." }, 503); }
 
   try {
     const accessToken = await getGoogleAccessToken(serviceAccount);
-    const base = `projects/${PROJECT_ID}/databases/(default)/documents`;
-    const habitName = `${base}/users/${uid}/habits/${habitId}`;
+    const base = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}`;
+    const habitName = `${base}/habits/${habitId}`;
     const completionName = `${habitName}/completions/${dateKey}`;
+    const profileName = `${base}/progress/stats`;
+    const eventId = `habit_${habitId}_${dateKey}`;
+    const eventName = `${base}/xpEvents/${eventId}`;
+    const habitDayName = `${base}/habitDays/${dateKey}`;
+    const urlFor = name => `https://firestore.googleapis.com/v1/${name}`;
     const [habitResponse, completionResponse] = await Promise.all([
-      firestoreRequest(`https://firestore.googleapis.com/v1/${habitName}`, accessToken),
-      firestoreRequest(`https://firestore.googleapis.com/v1/${completionName}`, accessToken),
+      firestoreRequest(urlFor(habitName), accessToken),
+      firestoreRequest(urlFor(completionName), accessToken),
     ]);
     if (habitResponse.status === 404) return json({ error: "This habit no longer exists." }, 404);
     if (!habitResponse.ok) return json({ error: "Could not load this habit." }, 502);
     if (!completionResponse.ok && completionResponse.status !== 404) return json({ error: "Could not check today's completion." }, 502);
+    const habit = decodeFields((await habitResponse.json()).fields || {});
+    if (completionResponse.ok) {
+      const p = await firestoreRequest(urlFor(profileName), accessToken);
+      const data = p.ok ? decodeFields((await p.json()).fields || {}) : {};
+      const total = Math.max(0, Number(data.xpTotal || 0));
+      return json({ ok: true, alreadyCompleted: true, xpAwarded: 0, xpTotal: total, level: Math.floor(total / 100) + 1, dateKey });
+    }
 
-    if (completionResponse.ok) return json({ ok: true, alreadyCompleted: true, dateKey });
-
+    const [profileResponse, dayResponse] = await Promise.all([
+      firestoreRequest(urlFor(profileName), accessToken),
+      firestoreRequest(urlFor(habitDayName), accessToken),
+    ]);
+    if (!profileResponse.ok && profileResponse.status !== 404) return json({ error: "Could not load your XP balance." }, 502);
+    if (!dayResponse.ok && dayResponse.status !== 404) return json({ error: "Could not load your streak record." }, 502);
+    const profileDocument = profileResponse.ok ? await profileResponse.json() : null;
+    const profile = profileDocument ? decodeFields(profileDocument.fields || {}) : {};
+    const currentXp = Math.max(0, Number(profile.xpTotal || 0));
+    const rewardXp = 5, nextXp = currentXp + rewardXp, nextLevel = Math.floor(nextXp / 100) + 1;
     const timestamp = new Date().toISOString();
+    const writes = [
+      { update: { name: completionName, fields: encodeFields({ habitId, dateKey, timezone, completedAt: timestamp }) }, currentDocument: { exists: false } },
+      {
+        update: { name: profileName, fields: encodeFields({ xpTotal: nextXp, level: nextLevel, updatedAt: timestamp, ...(!profileDocument ? { createdAt: timestamp } : {}) }) },
+        updateMask: { fieldPaths: ["xpTotal", "level", "updatedAt", ...(!profileDocument ? ["createdAt"] : [])] },
+        currentDocument: profileDocument ? { updateTime: profileDocument.updateTime } : { exists: false },
+      },
+      { update: { name: eventName, fields: encodeFields({ eventId, type: "habit_completed", habitId, habitTitle: String(habit.title || "").slice(0, 80), rewardXp, dateKey, timezone, awardedAt: timestamp }) }, currentDocument: { exists: false } },
+    ];
+    if (!dayResponse.ok) {
+      const previousKey = addDays(dateKey, -1);
+      const previousResponse = await firestoreRequest(urlFor(`${base}/habitDays/${previousKey}`), accessToken);
+      if (!previousResponse.ok && previousResponse.status !== 404) return json({ error: "Could not verify your previous streak." }, 502);
+      const previous = previousResponse.ok ? decodeFields((await previousResponse.json()).fields || {}) : {};
+      const currentStreak = previousResponse.ok ? Math.max(0, Number(previous.currentStreak || 0)) + 1 : 1;
+      const longestStreak = Math.max(currentStreak, Number(previous.longestStreak || 0));
+      writes.push({ update: { name: habitDayName, fields: encodeFields({ dateKey, timezone, currentStreak, longestStreak, firstCompletedAt: timestamp }) }, currentDocument: { exists: false } });
+    }
     const commitUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:commit`;
-    const completionCommit = await firestoreRequest(commitUrl, accessToken, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        writes: [{
-          update: {
-            name: completionName,
-            fields: encodeFields({ habitId, dateKey, timezone, completedAt: timestamp }),
-          },
-          currentDocument: { exists: false },
-        }],
-      }),
-    });
-    if (!completionCommit.ok) {
-      const detail = await completionCommit.text();
-      console.error("DAYLOCK habit completion write failed", completionCommit.status, detail.slice(0, 800));
-      if (completionCommit.status === 409 || completionCommit.status === 400) {
-        return json({ error: "This habit may already be marked complete today. Refresh and check again." }, 409);
-      }
-      return json({ error: "Could not save today's habit completion. Please retry." }, 502);
+    const commit = await firestoreRequest(commitUrl, accessToken, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ writes }) });
+    if (!commit.ok) {
+      const detail = await commit.text();
+      console.error("DAYLOCK habit reward commit failed", commit.status, detail.slice(0, 1000));
+      if (commit.status === 409 || commit.status === 400) return json({ error: "This habit or XP balance changed at the same time. Refresh and try again." }, 409);
+      return json({ error: "Could not save the habit completion and XP reward. Please retry." }, 502);
     }
-
-    // One per-user daily record powers streaks across all habits. The first
-    // completion of a local day creates it; later habit completions leave it intact.
-    const habitDayName = `${base}/users/${uid}/habitDays/${dateKey}`;
-    const habitDayResponse = await firestoreRequest(`https://firestore.googleapis.com/v1/${habitDayName}`, accessToken);
-    if (habitDayResponse.status === 404) {
-      const previousDateKey = addDays(dateKey, -1);
-      const previousName = `${base}/users/${uid}/habitDays/${previousDateKey}`;
-      const previousResponse = await firestoreRequest(`https://firestore.googleapis.com/v1/${previousName}`, accessToken);
-      if (!previousResponse.ok && previousResponse.status !== 404) {
-        console.error("DAYLOCK previous streak lookup failed", previousResponse.status);
-      } else {
-        const previous = previousResponse.ok ? decodeFields((await previousResponse.json()).fields || {}) : {};
-        const currentStreak = previousResponse.ok ? Math.max(0, Number(previous.currentStreak || 0)) + 1 : 1;
-        const longestStreak = Math.max(currentStreak, Number(previous.longestStreak || 0));
-        const dayCommit = await firestoreRequest(commitUrl, accessToken, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            writes: [{
-              update: {
-                name: habitDayName,
-                fields: encodeFields({ dateKey, timezone, currentStreak, longestStreak, firstCompletedAt: timestamp }),
-              },
-              currentDocument: { exists: false },
-            }],
-          }),
-        });
-        if (!dayCommit.ok && dayCommit.status !== 409 && dayCommit.status !== 400) {
-          console.error("DAYLOCK streak record write failed", dayCommit.status, (await dayCommit.text()).slice(0, 500));
-        }
-      }
-    } else if (!habitDayResponse.ok) {
-      console.error("DAYLOCK streak record lookup failed", habitDayResponse.status);
-    }
-
-    return json({ ok: true, alreadyCompleted: false, dateKey });
+    return json({ ok: true, alreadyCompleted: false, xpAwarded: rewardXp, xpTotal: nextXp, level: nextLevel, dateKey });
   } catch (error) {
     console.error("DAYLOCK habit completion failed", error);
     return json({ error: "The habit service could not complete this update. Please retry." }, 502);
   }
 }
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
