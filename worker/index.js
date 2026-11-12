@@ -556,6 +556,92 @@ async function advanceQuest(request, env, uid) {
   }
 }
 
+
+async function completeHabit(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    return json({ error: "The DAYLOCK habit service is not configured yet." }, 503);
+  }
+
+  let body;
+  try {
+    if (Number(request.headers.get("content-length") || 0) > 4_000) return json({ error: "Request is too large." }, 413);
+    body = await request.json();
+  } catch {
+    return json({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  const { habitId, timezone } = body || {};
+  if (typeof habitId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(habitId)) {
+    return json({ error: "Invalid habit identifier." }, 400);
+  }
+  if (typeof timezone !== "string" || timezone.length > 80) {
+    return json({ error: "Choose a valid timezone." }, 400);
+  }
+
+  let dateKey;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    dateKey = localDateKey(timezone);
+  } catch {
+    return json({ error: "The selected timezone is not valid." }, 400);
+  }
+
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) {
+      return json({ error: "The DAYLOCK server credential is not configured correctly." }, 503);
+    }
+  } catch {
+    return json({ error: "The DAYLOCK server credential is not valid JSON." }, 503);
+  }
+
+  try {
+    const accessToken = await getGoogleAccessToken(serviceAccount);
+    const base = `projects/${PROJECT_ID}/databases/(default)/documents`;
+    const habitName = `${base}/users/${uid}/habits/${habitId}`;
+    const completionName = `${habitName}/completions/${dateKey}`;
+    const [habitResponse, completionResponse] = await Promise.all([
+      firestoreRequest(`https://firestore.googleapis.com/v1/${habitName}`, accessToken),
+      firestoreRequest(`https://firestore.googleapis.com/v1/${completionName}`, accessToken),
+    ]);
+    if (habitResponse.status === 404) return json({ error: "This habit no longer exists." }, 404);
+    if (!habitResponse.ok) return json({ error: "Could not load this habit." }, 502);
+    if (!completionResponse.ok && completionResponse.status !== 404) return json({ error: "Could not check today's completion." }, 502);
+
+    if (completionResponse.ok) return json({ ok: true, alreadyCompleted: true, dateKey });
+
+    const timestamp = new Date().toISOString();
+    const commitUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:commit`;
+    const commitResponse = await firestoreRequest(commitUrl, accessToken, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        writes: [{
+          update: {
+            name: completionName,
+            fields: encodeFields({ habitId, dateKey, timezone, completedAt: timestamp }),
+          },
+          currentDocument: { exists: false },
+        }],
+      }),
+    });
+    if (!commitResponse.ok) {
+      const detail = await commitResponse.text();
+      console.error("DAYLOCK habit completion write failed", commitResponse.status, detail.slice(0, 800));
+      if (commitResponse.status === 409 || commitResponse.status === 400) {
+        return json({ error: "This habit may already be marked complete today. Refresh and check again." }, 409);
+      }
+      return json({ error: "Could not save today's habit completion. Please retry." }, 502);
+    }
+
+    return json({ ok: true, alreadyCompleted: false, dateKey });
+  } catch (error) {
+    console.error("DAYLOCK habit completion failed", error);
+    return json({ error: "The habit service could not complete this update. Please retry." }, 502);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -565,7 +651,7 @@ export default {
         return json({ ok: true, service: "daylock-schedule-api", configured: Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON) });
       }
       if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress") return json({ error: "Not found." }, 404);
+      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
@@ -577,6 +663,7 @@ export default {
         const uid = await verifyFirebaseIdToken(match[1]);
         if (url.pathname === "/api/schedules/override") return await emergencyOverride(request, env, uid);
         if (url.pathname === "/api/quests/progress") return await advanceQuest(request, env, uid);
+        if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);
         return await saveSchedule(request, env, uid);
       } catch (error) {
         console.warn("DAYLOCK request authentication failed", error);
