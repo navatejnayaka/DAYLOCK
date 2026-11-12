@@ -99,3 +99,14 @@
 .rank-track i{display:block;height:100%;border-radius:8px;background:linear-gradient(90deg,#91ad62,#d3e69a)}
 .challenge-rank>b{font:700 9px Manrope;color:#cbd8c3;white-space:nowrap}
 @media(max-width:480px){.challenge-rank{grid-template-columns:18px minmax(65px,1fr) 55px auto;gap:6px}.challenge-card-top{flex-direction:column}.challenge-fields{grid-template-columns:1fr}}
+
+.settings-form{width:min(620px,calc(100vw - 32px));max-height:min(88vh,820px);overflow:auto}
+.notification-permission{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.notification-permission>div,.reminder-toggle span{display:flex;flex-direction:column;gap:4px}
+.notification-permission span,.reminder-toggle small{font-size:12px;color:var(--muted)}
+.reminder-list{display:grid;gap:0;margin:8px 0 18px}
+.reminder-setting{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid var(--line)}
+.reminder-toggle{display:flex;align-items:center;gap:12px;cursor:pointer}
+.reminder-toggle input{width:18px;height:18px;accent-color:var(--lime)}
+.reminder-setting>input[type=time]{width:118px;min-width:118px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:#0a140e;color:var(--cream)}
+@media(max-width:520px){.reminder-setting{align-items:flex-start}.reminder-setting>input[type=time]{width:105px;min-width:105px}}
