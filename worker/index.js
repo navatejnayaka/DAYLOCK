@@ -613,7 +613,7 @@ async function completeHabit(request, env, uid) {
 
     const timestamp = new Date().toISOString();
     const commitUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:commit`;
-    const commitResponse = await firestoreRequest(commitUrl, accessToken, {
+    const completionCommit = await firestoreRequest(commitUrl, accessToken, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -626,13 +626,48 @@ async function completeHabit(request, env, uid) {
         }],
       }),
     });
-    if (!commitResponse.ok) {
-      const detail = await commitResponse.text();
-      console.error("DAYLOCK habit completion write failed", commitResponse.status, detail.slice(0, 800));
-      if (commitResponse.status === 409 || commitResponse.status === 400) {
+    if (!completionCommit.ok) {
+      const detail = await completionCommit.text();
+      console.error("DAYLOCK habit completion write failed", completionCommit.status, detail.slice(0, 800));
+      if (completionCommit.status === 409 || completionCommit.status === 400) {
         return json({ error: "This habit may already be marked complete today. Refresh and check again." }, 409);
       }
       return json({ error: "Could not save today's habit completion. Please retry." }, 502);
+    }
+
+    // One per-user daily record powers streaks across all habits. The first
+    // completion of a local day creates it; later habit completions leave it intact.
+    const habitDayName = `${base}/users/${uid}/habitDays/${dateKey}`;
+    const habitDayResponse = await firestoreRequest(`https://firestore.googleapis.com/v1/${habitDayName}`, accessToken);
+    if (habitDayResponse.status === 404) {
+      const previousDateKey = addDays(dateKey, -1);
+      const previousName = `${base}/users/${uid}/habitDays/${previousDateKey}`;
+      const previousResponse = await firestoreRequest(`https://firestore.googleapis.com/v1/${previousName}`, accessToken);
+      if (!previousResponse.ok && previousResponse.status !== 404) {
+        console.error("DAYLOCK previous streak lookup failed", previousResponse.status);
+      } else {
+        const previous = previousResponse.ok ? decodeFields((await previousResponse.json()).fields || {}) : {};
+        const currentStreak = previousResponse.ok ? Math.max(0, Number(previous.currentStreak || 0)) + 1 : 1;
+        const longestStreak = Math.max(currentStreak, Number(previous.longestStreak || 0));
+        const dayCommit = await firestoreRequest(commitUrl, accessToken, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            writes: [{
+              update: {
+                name: habitDayName,
+                fields: encodeFields({ dateKey, timezone, currentStreak, longestStreak, firstCompletedAt: timestamp }),
+              },
+              currentDocument: { exists: false },
+            }],
+          }),
+        });
+        if (!dayCommit.ok && dayCommit.status !== 409 && dayCommit.status !== 400) {
+          console.error("DAYLOCK streak record write failed", dayCommit.status, (await dayCommit.text()).slice(0, 500));
+        }
+      }
+    } else if (!habitDayResponse.ok) {
+      console.error("DAYLOCK streak record lookup failed", habitDayResponse.status);
     }
 
     return json({ ok: true, alreadyCompleted: false, dateKey });
