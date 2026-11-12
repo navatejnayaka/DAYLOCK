@@ -71,3 +71,31 @@
 .insight-day b{font:700 20px Manrope;color:#edf4e8}
 .insight-day small{font-size:9px;color:#819180}
 @media(max-width:620px){.insight-days{grid-template-columns:repeat(4,minmax(0,1fr))}}
+
+
+/* Squad challenge creation and shared leaderboard */
+.challenge-section{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
+.challenge-heading{display:flex;justify-content:space-between;align-items:center;color:var(--lime);margin-bottom:15px}
+.challenge-heading h3{font:700 19px Manrope;color:#edf4e8;margin:5px 0}
+.challenge-heading p{font-size:10px;color:var(--muted);margin:0}
+.challenge-create{padding:16px;margin:12px 0 16px;border:1px solid rgba(198,233,133,.2);border-radius:12px;background:#0b170f}
+.challenge-create label{display:grid;gap:6px;margin:10px 0;color:#cbd8c3;font-size:10px}
+.challenge-create input{width:100%;padding:11px 12px;border:1px solid #40583d;border-radius:8px;background:#09140d;color:#edf4e8;outline:none;font:11px 'DM Sans',sans-serif}
+.challenge-create input:focus{border-color:#a8ca6b}
+.challenge-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.challenge-create button{margin-top:8px}
+.challenge-empty{padding:18px;text-align:center;border:1px dashed #40583d;border-radius:10px;color:var(--muted);font-size:10px;line-height:1.6}
+.challenge-card{padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:12px;background:rgba(8,19,12,.55)}
+.challenge-card-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.challenge-card-top h4{font:700 14px Manrope;color:#edf4e8;margin:0 0 5px}
+.challenge-card-top p{font-size:10px;color:var(--muted);line-height:1.5;margin:0}
+.challenge-card-top>span{white-space:nowrap;color:var(--gold);font-size:9px;border:1px solid rgba(216,189,128,.25);padding:6px 8px;border-radius:20px}
+.challenge-progress-button{margin:13px 0 15px;font-size:10px}
+.challenge-board>.eyebrow{margin-bottom:8px}
+.challenge-rank{display:grid;grid-template-columns:22px minmax(70px,1fr) minmax(55px,.8fr) auto;gap:8px;align-items:center;padding:9px 0;border-top:1px solid var(--line)}
+.rank-number{font:700 10px Manrope;color:var(--gold)}
+.rank-name{font-size:10px;color:#dce7d6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rank-track{height:6px;border-radius:8px;background:#263629;overflow:hidden}
+.rank-track i{display:block;height:100%;border-radius:8px;background:linear-gradient(90deg,#91ad62,#d3e69a)}
+.challenge-rank>b{font:700 9px Manrope;color:#cbd8c3;white-space:nowrap}
+@media(max-width:480px){.challenge-rank{grid-template-columns:18px minmax(65px,1fr) 55px auto;gap:6px}.challenge-card-top{flex-direction:column}.challenge-fields{grid-template-columns:1fr}}
