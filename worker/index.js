@@ -733,6 +733,7 @@ async function runScheduledReminders(env) {
   try { serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON); } catch { return; }
   try {
     const access = await getGoogleAccessToken(serviceAccount);
+    const fcmAccess = await getGoogleAccessToken(serviceAccount, FCM_SCOPE);
     const queryUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:runQuery`;
     const query = { structuredQuery: { from: [{ collectionId: "reminderSettings", allDescendants: true }], limit: 500 } };
     const response = await firestoreRequest(queryUrl, access, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(query) });
@@ -754,7 +755,7 @@ async function runScheduledReminders(env) {
       for (const [key, copy] of Object.entries(REMINDER_COPY)) {
         const item = reminders[key];
         if (!item?.enabled || item.time !== time || data[`lastSent_${key}`] === dateKey) continue;
-        const sent = await sendReminder(env, access, data.token, copy[0], copy[1], `daylock-${key}-${dateKey}`);
+        const sent = await sendReminder(env, fcmAccess, data.token, copy[0], copy[1], `daylock-${key}-${dateKey}`);
         if (!sent) continue;
         const mask = `lastSent_${key}`;
         await firestoreRequest(`https://firestore.googleapis.com/v1/${document.name}?updateMask.fieldPaths=${mask}`, access, {
