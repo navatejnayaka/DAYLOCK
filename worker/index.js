@@ -99,7 +99,7 @@ function sameTaskDetails(before, after) {
 }
 
 
-async function verifyFirebaseIdToken(token) {
+async function verifyFirebaseIdToken(token, requireRecentAuth = false) {
   const now = Date.now();
   if (!certCache || now >= certCacheUntil) {
     const response = await fetch(CERT_URL, { headers: { accept: "application/json" } });
@@ -123,6 +123,7 @@ async function verifyFirebaseIdToken(token) {
   });
 
   const seconds = Math.floor(now / 1000);
+  if (requireRecentAuth && seconds - payload.auth_time > 300) throw new Error("Please sign in again before deleting your account.");
   if (protectedHeader.alg !== "RS256" || typeof payload.sub !== "string" || !payload.sub
     || payload.sub.length > 128 || typeof payload.auth_time !== "number"
     || payload.auth_time > seconds + 5 || typeof payload.iat !== "number"
@@ -687,6 +688,133 @@ const REMINDER_COPY = {
   habit: ["Daily habits", "Your daily habit check-in is ready in DAYLOCK."]
 };
 
+
+const FIREBASE_AUTH_DELETE_URL = `https://identitytoolkit.googleapis.com/v1/projects/${PROJECT_ID}/accounts:delete`;
+const GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
+
+async function listFirestoreCollection(access, collectionPath) {
+  const results = [];
+  let pageToken = "";
+  do {
+    const query = new URLSearchParams({ pageSize: "500" });
+    if (pageToken) query.set("pageToken", pageToken);
+    const response = await firestoreRequest(`https://firestore.googleapis.com/v1/${collectionPath}?${query}`, access);
+    if (!response.ok) {
+      if (response.status === 404) return results;
+      throw new Error(`Could not list Firestore collection (${response.status}).`);
+    }
+    const data = await response.json();
+    results.push(...(data.documents || []));
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+  return results;
+}
+
+async function listFirestoreSubcollections(access, documentName) {
+  const ids = [];
+  let pageToken = "";
+  do {
+    const response = await firestoreRequest(`https://firestore.googleapis.com/v1/${documentName}:listCollectionIds`, access, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pageSize: 100, ...(pageToken ? { pageToken } : {}) }),
+    });
+    if (!response.ok) {
+      if (response.status === 404) return ids;
+      throw new Error(`Could not inspect Firestore subcollections (${response.status}).`);
+    }
+    const data = await response.json();
+    ids.push(...(data.collectionIds || []));
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+  return ids;
+}
+
+async function deleteFirestoreDocument(access, documentName) {
+  const response = await firestoreRequest(`https://firestore.googleapis.com/v1/${documentName}`, access, { method: "DELETE" });
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Could not delete a Firestore record (${response.status}).`);
+  }
+}
+
+async function deleteFirestoreTree(access, documentName, counter, depth = 0) {
+  if (depth > 20 || counter.value > 12000) throw new Error("Account data is too large to delete safely in one request.");
+  const collectionIds = await listFirestoreSubcollections(access, documentName);
+  for (const collectionId of collectionIds) {
+    const collectionPath = `${documentName}/${collectionId}`;
+    const documents = await listFirestoreCollection(access, collectionPath);
+    for (const child of documents) {
+      await deleteFirestoreTree(access, child.name, counter, depth + 1);
+    }
+  }
+  await deleteFirestoreDocument(access, documentName);
+  counter.value += 1;
+}
+
+async function deleteAccountData(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The secure account deletion service is not configured." }, 503);
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) {
+      return json({ error: "The account deletion service credentials are not valid for this project." }, 503);
+    }
+  } catch {
+    return json({ error: "The account deletion service credentials are unavailable." }, 503);
+  }
+
+  try {
+    const access = await getGoogleAccessToken(serviceAccount, GOOGLE_CLOUD_PLATFORM_SCOPE);
+    const counter = { value: 0 };
+    const base = `projects/${PROJECT_ID}/databases/(default)/documents`;
+    const squads = await listFirestoreCollection(access, `${base}/squads`);
+    const ownedSquads = new Set();
+
+    for (const squad of squads) {
+      const members = await listFirestoreCollection(access, `${squad.name}/members`);
+      const myMembership = members.find(member => member.name.endsWith(`/members/${uid}`));
+      const squadData = decodeFields(squad.fields || {});
+      if (myMembership && decodeFields(myMembership.fields || {}).role === "owner" || squadData.createdBy === uid) {
+        ownedSquads.add(squad.name.split("/").pop());
+        for (const member of members) {
+          const memberId = member.name.split("/").pop();
+          await deleteFirestoreDocument(access, `${base}/users/${memberId}/squads/${squad.name.split("/").pop()}`);
+        }
+        await deleteFirestoreTree(access, squad.name, counter);
+      } else if (myMembership) {
+        await deleteFirestoreDocument(access, myMembership.name);
+        counter.value += 1;
+      }
+    }
+
+    const invites = await listFirestoreCollection(access, `${base}/squadInvites`);
+    for (const invite of invites) {
+      const data = decodeFields(invite.fields || {});
+      if (data.createdBy === uid || ownedSquads.has(String(data.squadId || ""))) {
+        await deleteFirestoreDocument(access, invite.name);
+        counter.value += 1;
+      }
+    }
+
+    await deleteFirestoreTree(access, `${base}/users/${uid}`, counter);
+
+    const authResponse = await firestoreRequest(FIREBASE_AUTH_DELETE_URL, access, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ localId: uid }),
+    });
+    if (!authResponse.ok) {
+      const detail = (await authResponse.text()).slice(0, 500);
+      console.error("Firebase account deletion failed after data cleanup", authResponse.status, detail);
+      return json({ error: "Your DAYLOCK data was removed, but Firebase could not finish deleting the login. Contact support before creating another account." }, 502);
+    }
+    return json({ ok: true, deletedRecords: counter.value });
+  } catch (error) {
+    console.error("Secure account deletion failed", error);
+    return json({ error: "Account deletion could not be completed. Your sign-in remains active; contact support before retrying." }, 502);
+  }
+}
+
 async function registerReminders(request, env, uid) {
   if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The reminder service is not configured." }, 503);
   let body;
@@ -781,7 +909,7 @@ export default {
         return json({ ok: true, service: "daylock-schedule-api", configured: Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON) });
       }
       if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete" && url.pathname !== "/api/squad-challenges/progress" && url.pathname !== "/api/reminders/register") return json({ error: "Not found." }, 404);
+      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete" && url.pathname !== "/api/squad-challenges/progress" && url.pathname !== "/api/reminders/register" && url.pathname !== "/api/account/delete") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
@@ -790,7 +918,8 @@ export default {
       if (!match) return json({ error: "Please sign in again." }, 401);
 
       try {
-        const uid = await verifyFirebaseIdToken(match[1]);
+        const uid = await verifyFirebaseIdToken(match[1], url.pathname === "/api/account/delete");
+        if (url.pathname === "/api/account/delete") return await deleteAccountData(request, env, uid);
         if (url.pathname === "/api/schedules/override") return await emergencyOverride(request, env, uid);
         if (url.pathname === "/api/quests/progress") return await advanceQuest(request, env, uid);
         if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);
