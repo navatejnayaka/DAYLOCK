@@ -805,6 +805,56 @@ async function deleteAccountData(request, env, uid) {
   }
 }
 
+async function reminderDeviceId(token) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function listReminderDevices(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The reminder service is not configured." }, 503);
+  try {
+    const serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    const access = await getGoogleAccessToken(serviceAccount);
+    const collectionPath = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/reminderSettings`;
+    const documents = await listFirestoreCollection(access, collectionPath);
+    const devices = documents.map(document => {
+      const data = decodeFields(document.fields || {});
+      const id = document.name.split("/").pop();
+      return {
+        id,
+        label: id === "main" ? "Previous device registration" : "Browser notification device",
+        timezone: typeof data.timezone === "string" ? data.timezone : "Unknown",
+        updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : null,
+        enabledReminders: Object.entries(data.reminders || {}).filter(([, item]) => item?.enabled === true).map(([key]) => key),
+      };
+    });
+    return json({ ok: true, devices });
+  } catch (error) {
+    console.error("Reminder device list failed", error);
+    return json({ error: "Could not load your registered notification devices." }, 502);
+  }
+}
+
+async function removeReminderDevice(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The reminder service is not configured." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "Device identifier is required." }, 400); }
+  const deviceId = body?.deviceId;
+  if (typeof deviceId !== "string" || !(deviceId === "main" || /^[a-f0-9]{64}$/.test(deviceId))) {
+    return json({ error: "Invalid notification device identifier." }, 400);
+  }
+  try {
+    const serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    const access = await getGoogleAccessToken(serviceAccount);
+    const documentName = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/reminderSettings/${deviceId}`;
+    await deleteFirestoreDocument(access, documentName);
+    return json({ ok: true });
+  } catch (error) {
+    console.error("Reminder device removal failed", error);
+    return json({ error: "Could not remove this notification device." }, 502);
+  }
+}
+
 async function registerReminders(request, env, uid) {
   if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The reminder service is not configured." }, 503);
   let body;
@@ -825,13 +875,15 @@ async function registerReminders(request, env, uid) {
   try { serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON); } catch { return json({ error: "Reminder service credentials are invalid." }, 503); }
   try {
     const access = await getGoogleAccessToken(serviceAccount);
-    const name = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/reminderSettings/main`;
+    const deviceId = await reminderDeviceId(token);
+    const name = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/reminderSettings/${deviceId}`;
     const payload = { fields: encodeFields({ uid, token, timezone, reminders: safe, updatedAt: new Date().toISOString() }) };
     const response = await firestoreRequest(`https://firestore.googleapis.com/v1/${name}`, access, {
       method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(payload)
     });
     if (!response.ok) { console.error("Reminder settings save failed", response.status, (await response.text()).slice(0,500)); return json({ error: "Could not save background reminder settings." }, 502); }
-    return json({ ok: true });
+    await deleteFirestoreDocument(access, `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/reminderSettings/main`).catch(() => {});
+    return json({ ok: true, deviceId });
   } catch (error) { console.error("Reminder registration failed", error); return json({ error: "Could not register this device for reminders." }, 502); }
 }
 
@@ -899,7 +951,7 @@ export default {
         return json({ ok: true, service: "daylock-schedule-api", configured: Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON) });
       }
       if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete" && url.pathname !== "/api/squad-challenges/progress" && url.pathname !== "/api/reminders/register" && url.pathname !== "/api/account/delete") return json({ error: "Not found." }, 404);
+      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete" && url.pathname !== "/api/squad-challenges/progress" && url.pathname !== "/api/reminders/register" && url.pathname !== "/api/reminders/list" && url.pathname !== "/api/reminders/remove" && url.pathname !== "/api/account/delete") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
@@ -915,6 +967,8 @@ export default {
         if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);
         if (url.pathname === "/api/squad-challenges/progress") return await updateSquadChallengeProgress(request, env, uid);
         if (url.pathname === "/api/reminders/register") return await registerReminders(request, env, uid);
+        if (url.pathname === "/api/reminders/list") return await listReminderDevices(request, env, uid);
+        if (url.pathname === "/api/reminders/remove") return await removeReminderDevice(request, env, uid);
         return await saveSchedule(request, env, uid);
       } catch (error) {
         console.warn("DAYLOCK request authentication failed", error);
