@@ -3,6 +3,7 @@ import type { FormEvent, ReactNode } from 'react'
 import type { User } from 'firebase/auth'
 import {
   createUserWithEmailAndPassword,
+  deleteUser,
   EmailAuthProvider,
   reauthenticateWithCredential,
   onAuthStateChanged,
@@ -192,6 +193,7 @@ function App() {
     if (!currentUser?.email) { notify('A signed-in email account is required for deletion.'); return }
     if (deletePhrase !== 'DELETE' || !deletePassword) { notify('Enter your password and type DELETE to confirm.'); return }
     setAccountDeleting(true)
+    let dataCleaned = false
     try {
       const credential = EmailAuthProvider.credential(currentUser.email, deletePassword)
       await reauthenticateWithCredential(currentUser, credential)
@@ -202,9 +204,10 @@ function App() {
         body: JSON.stringify({ confirmation: 'DELETE' }),
       })
       const result = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(result.error || 'Account deletion could not be completed.')
+      if (!response.ok) throw new Error(result.error || 'Account data cleanup could not be completed.')
+      dataCleaned = true
+      await deleteUser(currentUser)
       try { localStorage.removeItem('daylock-reminders-' + currentUser.uid) } catch { /* Local storage may be unavailable. */ }
-      await signOut(auth)
       setCurrentUser(null)
       setDemo(false)
       setEnteredApp(false)
@@ -216,7 +219,9 @@ function App() {
       const message = code.includes('auth/wrong-password') || code.includes('auth/invalid-credential')
         ? 'That password was not accepted. Check it and try again.'
         : error instanceof Error ? error.message : 'Account deletion failed. Please try again.'
-      notify(message)
+      notify(dataCleaned
+        ? 'Your DAYLOCK data was cleared, but Firebase could not delete the login. Sign in again and contact support.'
+        : message)
     } finally { setAccountDeleting(false) }
   }
 
