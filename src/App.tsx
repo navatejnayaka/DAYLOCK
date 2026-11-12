@@ -399,8 +399,11 @@ function App() {
     if (completedHabitIds.includes(habitId) || habitSaving) return
     if (demo) {
       setCompletedHabitIds(old => [...old, habitId])
-      setXpTotal(old => old + 5)
-      setLevel(old => Math.floor((old * 0 + xpTotal + 5) / 100) + 1)
+      setXpTotal(old => {
+        const next = old + 5
+        setLevel(Math.floor(next / 100) + 1)
+        return next
+      })
       notify('Habit completed · +5 XP')
       return
     }
