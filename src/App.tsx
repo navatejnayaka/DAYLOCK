@@ -297,9 +297,15 @@ function App() {
         getDocs(collection(db, 'users', uid, 'xpEvents')),
         getDocs(collection(db, 'users', uid, 'habitDays')),
         getDocs(collection(db, 'users', uid, 'squads')),
-        getDocs(collection(db, 'users', uid, 'reminderSettings')),
         getDoc(doc(db, 'users', uid, 'settings', 'privacy')),
       ])
+      const reminderResponse = await fetch('/api/reminders/list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + await currentUser.getIdToken() },
+        body: JSON.stringify({}),
+      })
+      const reminderResult = await reminderResponse.json().catch(() => ({}))
+      if (!reminderResponse.ok) throw new Error(reminderResult.error || 'Could not include reminder preferences in the export.')
       const schedules = await Promise.all(scheduleSnap.docs.map(async item => {
         const audit = await getDocs(collection(db, 'users', uid, 'schedules', item.id, 'audit'))
         return { id: item.id, ...item.data(), audit: audit.docs.map(entry => ({ id: entry.id, ...entry.data() })) }
@@ -321,10 +327,13 @@ function App() {
         habitDays: habitDaySnap.docs.map(item => ({ id: item.id, ...item.data() })),
         squads: squadSnap.docs.map(item => ({ id: item.id, ...item.data() })),
         privacy: privacySnap.exists() ? privacySnap.data() : { shareDisplayNameWithSquads: true },
-        reminders: reminderSnap.docs.map(item => {
-          const data = item.data()
-          return { id: item.id, timezone: data.timezone || null, reminders: data.reminders || null, updatedAt: data.updatedAt || null, deviceRegistered: Boolean(data.token) }
-        }),
+        reminders: Array.isArray(reminderResult.devices) ? reminderResult.devices.map((device: ReminderDevice & { reminders?: ReminderSettings }) => ({
+          id: device.id,
+          timezone: device.timezone,
+          reminders: device.reminders || {},
+          updatedAt: device.updatedAt,
+          deviceRegistered: true,
+        })) : [],
         privacyNote: 'Push notification tokens and authentication credentials are not included in this export.',
       }
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
