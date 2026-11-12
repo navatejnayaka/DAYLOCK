@@ -670,6 +670,7 @@ function SquadCenter({ user }: { user: User }) {
   const [squads,setSquads]=useState<SquadSummary[]>([])
   const [selected,setSelected]=useState<SquadSummary|null>(null)
   const [members,setMembers]=useState<SquadMember[]>([])
+  const [challenges,setChallenges]=useState<Array<{id:string;title:string;description:string;target:number;unit:string;status:string;progress:Record<string,number>}>>([])
   const [loading,setLoading]=useState(true)
   const [busy,setBusy]=useState(false)
   const [mode,setMode]=useState<'create'|'join'|null>(null)
@@ -678,6 +679,10 @@ function SquadCenter({ user }: { user: User }) {
   const [inviteCode,setInviteCode]=useState('')
   const [message,setMessage]=useState('')
   const [error,setError]=useState('')
+  const [challengeTitle,setChallengeTitle]=useState('')
+  const [challengeDescription,setChallengeDescription]=useState('')
+  const [challengeTarget,setChallengeTarget]=useState('10')
+  const [challengeUnit,setChallengeUnit]=useState('points')
   const displayName=user.displayName?.trim()||user.email?.split('@')[0]||'DAYLOCK Member'
 
   const loadSquads=async()=>{
@@ -686,22 +691,30 @@ function SquadCenter({ user }: { user: User }) {
       const snap=await getDocs(collection(db,'users',user.uid,'squads'))
       const items=snap.docs.map(d=>({id:d.id,name:String(d.data().name||'Untitled squad'),role:String(d.data().role||'member')}))
       setSquads(items)
-      if(selected&&!items.some(item=>item.id===selected.id)){setSelected(null);setMembers([]);setInviteCode('')}
+      if(selected&&!items.some(item=>item.id===selected.id)){setSelected(null);setMembers([]);setInviteCode('');setChallenges([])}
     }catch(e){setError(squadErrorMessage(e))}
     finally{setLoading(false)}
   }
   useEffect(()=>{void loadSquads()},[user.uid])
+  const loadChallenges=async(id:string, roster:SquadMember[])=>{
+    const snap=await getDocs(collection(db,'squads',id,'challenges'))
+    const docs=await Promise.all(snap.docs.map(async d=>{
+      const data=d.data()
+      const progressSnap=await getDocs(collection(db,'squads',id,'challenges',d.id,'progress'))
+      const progress:Record<string,number>={}
+      progressSnap.docs.forEach(p=>{progress[p.id]=Math.max(0,Number(p.data().progress||0))})
+      return {id:d.id,title:String(data.title||'Squad challenge'),description:String(data.description||''),target:Number(data.target||1),unit:String(data.unit||'points'),status:String(data.status||'active'),progress}
+    }))
+    setChallenges(docs.filter(c=>c.status==='active'))
+  }
   const openSquad=async(item:SquadSummary)=>{
     setBusy(true);setError('');setMessage('')
     try{
-      const [squadSnap,memberSnap]=await Promise.all([
-        getDoc(doc(db,'squads',item.id)),
-        getDocs(collection(db,'squads',item.id,'members'))
-      ])
+      const [squadSnap,memberSnap]=await Promise.all([getDoc(doc(db,'squads',item.id)),getDocs(collection(db,'squads',item.id,'members'))])
       if(!squadSnap.exists())throw new Error('This squad could not be found.')
-      setSelected(item)
-      setInviteCode(String(squadSnap.data().inviteCode||''))
-      setMembers(memberSnap.docs.map(d=>({uid:String(d.data().uid||d.id),displayName:String(d.data().displayName||'DAYLOCK Member'),role:String(d.data().role||'member')})))
+      const roster=memberSnap.docs.map(d=>({uid:String(d.data().uid||d.id),displayName:String(d.data().displayName||'DAYLOCK Member'),role:String(d.data().role||'member')}))
+      setSelected(item);setInviteCode(String(squadSnap.data().inviteCode||''));setMembers(roster)
+      await loadChallenges(item.id,roster)
     }catch(e){setError(squadErrorMessage(e))}
     finally{setBusy(false)}
   }
@@ -711,11 +724,7 @@ function SquadCenter({ user }: { user: User }) {
     if(name.length<3||name.length>32){setError('Squad names must be between 3 and 32 characters.');return}
     setBusy(true);setError('');setMessage('')
     try{
-      const code=makeInviteCode()
-      const squadRef=doc(collection(db,'squads'))
-      const memberRef=doc(db,'squads',squadRef.id,'members',user.uid)
-      const userIndexRef=doc(db,'users',user.uid,'squads',squadRef.id)
-      const inviteRef=doc(db,'squadInvites',code)
+      const code=makeInviteCode(),squadRef=doc(collection(db,'squads')),memberRef=doc(db,'squads',squadRef.id,'members',user.uid),userIndexRef=doc(db,'users',user.uid,'squads',squadRef.id),inviteRef=doc(db,'squadInvites',code)
       const batch=writeBatch(db)
       batch.set(squadRef,{name,createdBy:user.uid,inviteCode:code,createdAt:serverTimestamp()})
       batch.set(memberRef,{uid:user.uid,displayName,role:'owner',joinedAt:serverTimestamp()})
@@ -723,7 +732,7 @@ function SquadCenter({ user }: { user: User }) {
       batch.set(inviteRef,{squadId:squadRef.id,squadName:name,createdBy:user.uid,active:true,createdAt:serverTimestamp()})
       await batch.commit()
       const item={id:squadRef.id,name,role:'owner'}
-      setSquads(items=>[item,...items]);setSelected(item);setMembers([{uid:user.uid,displayName,role:'owner'}]);setInviteCode(code);setSquadName('');setMode(null)
+      setSquads(items=>[item,...items]);setSelected(item);setMembers([{uid:user.uid,displayName,role:'owner'}]);setInviteCode(code);setChallenges([]);setSquadName('');setMode(null)
       setMessage('Your private squad is ready. Share this invite code with friends.')
     }catch(e){setError(squadErrorMessage(e))}
     finally{setBusy(false)}
@@ -736,25 +745,43 @@ function SquadCenter({ user }: { user: User }) {
     try{
       const inviteSnap=await getDoc(doc(db,'squadInvites',code))
       if(!inviteSnap.exists()||inviteSnap.data().active!==true)throw new Error('That invite code is invalid or inactive.')
-      const invite=inviteSnap.data();const squadId=String(invite.squadId||'')
-      const memberRef=doc(db,'squads',squadId,'members',user.uid)
-      const memberSnap=await getDoc(memberRef)
-      if(memberSnap.exists())throw new Error('You are already a member of this squad.')
-      const name=String(invite.squadName||'DAYLOCK Squad')
-      const batch=writeBatch(db)
+      const invite=inviteSnap.data(),squadId=String(invite.squadId||''),memberRef=doc(db,'squads',squadId,'members',user.uid)
+      if((await getDoc(memberRef)).exists())throw new Error('You are already a member of this squad.')
+      const name=String(invite.squadName||'DAYLOCK Squad'),batch=writeBatch(db)
       batch.set(memberRef,{uid:user.uid,displayName,role:'member',inviteCode:code,joinedAt:serverTimestamp()})
       batch.set(doc(db,'users',user.uid,'squads',squadId),{squadId,name,role:'member',joinedAt:serverTimestamp()})
       await batch.commit()
       const item={id:squadId,name,role:'member'}
-      setSquads(items=>items.some(x=>x.id===squadId)?items:[item,...items]);setSelected(item);setMembers([{uid:user.uid,displayName,role:'member'}]);setInviteCode('');setInviteInput('');setMode(null)
-      setMessage(`You joined ${name}. Welcome to the crew!`)
-      await loadMembers(squadId)
+      setSquads(items=>items.some(x=>x.id===squadId)?items:[item,...items]);setSelected(item);setInviteCode('');setInviteInput('');setMode(null)
+      await openSquad(item);setMessage(`You joined ${name}. Welcome to the crew!`)
     }catch(e){setError(squadErrorMessage(e))}
     finally{setBusy(false)}
   }
-  const loadMembers=async(id:string)=>{
-    const snap=await getDocs(collection(db,'squads',id,'members'))
-    setMembers(snap.docs.map(d=>({uid:String(d.data().uid||d.id),displayName:String(d.data().displayName||'DAYLOCK Member'),role:String(d.data().role||'member')})))
+  const createChallenge=async(event:FormEvent<HTMLFormElement>)=>{
+    event.preventDefault()
+    if(!selected||selected.role!=='owner'||busy)return
+    const title=challengeTitle.trim(),description=challengeDescription.trim(),target=Number(challengeTarget),unit=challengeUnit.trim()
+    if(title.length<3||title.length>80){setError('Challenge title must be 3–80 characters.');return}
+    if(description.length>240||!Number.isInteger(target)||target<1||target>100000||!unit||unit.length>24){setError('Check the description, target (1–100000), and unit (1–24 characters).');return}
+    setBusy(true);setError('');setMessage('')
+    try{
+      await addDoc(collection(db,'squads',selected.id,'challenges'),{title,description,target,unit,status:'active',createdBy:user.uid,createdAt:serverTimestamp()})
+      await loadChallenges(selected.id,members);setChallengeTitle('');setChallengeDescription('');setChallengeTarget('10');setChallengeUnit('points');setMessage('Squad challenge created!')
+    }catch(e){setError(squadErrorMessage(e))}
+    finally{setBusy(false)}
+  }
+  const addProgress=async(challengeId:string)=>{
+    if(!selected||busy)return
+    setBusy(true);setError('');setMessage('')
+    try{
+      const token=await user.getIdToken()
+      const response=await fetch('/api/squad-challenges/progress',{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${token}`},body:JSON.stringify({squadId:selected.id,challengeId,amount:1})})
+      const result=await response.json().catch(()=>({}))
+      if(!response.ok)throw new Error(result.error||'Could not update challenge progress.')
+      setChallenges(old=>old.map(c=>c.id===challengeId?{...c,progress:{...c.progress,[user.uid]:Number(result.progress)}}:c))
+      setMessage('Progress updated. Your squad leaderboard is refreshed.')
+    }catch(e){setError(squadErrorMessage(e))}
+    finally{setBusy(false)}
   }
   const copyInvite=async()=>{
     if(!inviteCode)return
@@ -766,8 +793,12 @@ function SquadCenter({ user }: { user: User }) {
     <div className="squad-hero"><div><div className="eyebrow">YOUR PEOPLE, YOUR PACE</div><h2>{selected?selected.name:'Find your crew.'}</h2><p>{selected?'Your squad space is private. Share its invite code with people you trust.':'Create a private squad or join friends with a 10-character invite code. Your full timetable stays private.'}</p><div className="squad-action-row"><button className="primary" onClick={()=>{setMode('create');setError('');setMessage('')}}><Plus size={16}/> Create a squad</button><button className="secondary" onClick={()=>{setMode('join');setError('');setMessage('')}}>Join with code <ArrowRight size={15}/></button></div></div><div className="squad-emblem"><Users size={52}/></div></div>
     {mode&&<div className="panel squad-form-panel"><button className="squad-form-close" type="button" onClick={()=>setMode(null)} aria-label="Close"><X size={17}/></button><div className="eyebrow">{mode==='create'?'START A PRIVATE CREW':'JOIN YOUR FRIENDS'}</div><h2>{mode==='create'?'Create your squad':'Enter an invite code'}</h2>{mode==='create'?<form onSubmit={createSquad}><label>Squad name<input value={squadName} onChange={e=>setSquadName(e.target.value)} placeholder="e.g. The Night Owls" maxLength={32} required/></label><button className="primary" type="submit" disabled={busy}>{busy?'Creating…':'Create private squad'} <ArrowRight size={15}/></button></form>:<form onSubmit={joinSquad}><label>10-character invite code<input value={inviteInput} onChange={e=>setInviteInput(e.target.value.toUpperCase().replace(/[^A-HJ-NP-Z2-9]/g,'').slice(0,10))} placeholder="ABCD2345FG" maxLength={10} required/></label><button className="primary" type="submit" disabled={busy}>{busy?'Joining…':'Join squad'} <ArrowRight size={15}/></button></form>}</div>}
     {error&&<div className="squad-alert error" role="alert">{error}</div>}{message&&<div className="squad-alert success" role="status">{message}</div>}
-    <div className="squad-layout"><section className="panel squad-list-panel"><div className="panel-title"><div><Users size={18}/><h3>Your squads</h3></div><button className="text-button" onClick={()=>void loadSquads()} disabled={loading}>Refresh <ArrowRight size={14}/></button></div>{loading?<p className="squad-muted">Loading your squads…</p>:squads.length===0?<div className="empty-state"><div className="empty-icon"><Users/></div><b>No squads yet</b><p>Create your first crew or join one using a friend's invite code.</p></div>:<div className="squad-list">{squads.map(item=><button key={item.id} className={selected?.id===item.id?'squad-list-item selected':'squad-list-item'} onClick={()=>void openSquad(item)}><span className="squad-list-icon"><Users size={16}/></span><span><b>{item.name}</b><small>{item.role==='owner'?'Squad owner':'Member'}</small></span><ChevronRight size={15}/></button>)}</div>}</section>
-    <section className="panel squad-detail-panel"><div className="panel-title"><div><Trophy size={18}/><h3>Squad space</h3></div></div>{!selected?<div className="empty-state"><div className="empty-icon"><HeartHandshake/></div><b>Your arena is waiting</b><p>Choose a squad to see its members and invite code. Members only see shared squad details — never each other's private schedules.</p></div>:<><div className="squad-detail-heading"><div><span className="eyebrow">PRIVATE SQUAD</span><h2>{selected.name}</h2><p>{members.length} {members.length===1?'member':'members'} · {selected.role==='owner'?'You created this squad':'You joined this squad'}</p></div><div className="squad-emblem small-emblem"><Users size={27}/></div></div>{selected.role==='owner'&&<div className="invite-share"><div><span>INVITE CODE</span><b>{inviteCode||'Loading…'}</b></div><button className="secondary" onClick={()=>void copyInvite()} disabled={!inviteCode}>Copy code</button></div>}<div className="member-list"><div className="eyebrow">MEMBERS</div>{members.map(member=><div className="member-row" key={member.uid}><span className="member-avatar">{member.displayName.slice(0,1).toUpperCase()}</span><span><b>{member.displayName}</b><small>{member.role==='owner'?'Squad owner':'Member'}</small></span>{member.role==='owner'&&<span className="owner-pill">OWNER</span>}</div>)}</div></>}</section></div>
+    <div className="squad-layout"><section className="panel squad-list-panel"><div className="panel-title"><div><Users size={18}/><h3>Your squads</h3></div><button className="text-button" onClick={()=>void loadSquads()} disabled={loading}>Refresh <ArrowRight size={14}/></button></div>{loading?<p className="squad-muted">Loading your squads…</p>:squads.length===0?<div className="empty-state"><div className="empty-icon"><Users/></div><b>No squads yet</b><p>Create your first crew or join one using a friend's invite code.</p></div>:<div className="squad-list">{squads.map(item=><button key={item.id} className={selected?.id===item.id?'squad-list-item selected':'squad-list-item'} onClick={()=>void openSquad(item)} disabled={busy}><span className="squad-list-icon"><Users size={16}/></span><span><b>{item.name}</b><small>{item.role==='owner'?'Squad owner':'Member'}</small></span><ChevronRight size={15}/></button>)}</div>}</section>
+    <section className="panel squad-detail-panel"><div className="panel-title"><div><Trophy size={18}/><h3>Squad space</h3></div><button className="text-button" onClick={()=>selected&&void openSquad(selected)} disabled={!selected||busy}>Refresh</button></div>{!selected?<div className="empty-state"><div className="empty-icon"><HeartHandshake/></div><b>Your arena is waiting</b><p>Choose a squad to see its members and invite code. Members only see shared squad details — never each other's private schedules.</p></div>:<><div className="squad-detail-heading"><div><span className="eyebrow">PRIVATE SQUAD</span><h2>{selected.name}</h2><p>{members.length} {members.length===1?'member':'members'} · {selected.role==='owner'?'You created this squad':'You joined this squad'}</p></div><div className="squad-emblem small-emblem"><Users size={27}/></div></div>{selected.role==='owner'&&<div className="invite-share"><div><span>INVITE CODE</span><b>{inviteCode||'Loading…'}</b></div><button className="secondary" onClick={()=>void copyInvite()} disabled={!inviteCode}>Copy code</button></div>}<div className="member-list"><div className="eyebrow">MEMBERS</div>{members.map(member=><div className="member-row" key={member.uid}><span className="member-avatar">{member.displayName.slice(0,1).toUpperCase()}</span><span><b>{member.displayName}</b><small>{member.role==='owner'?'Squad owner':'Member'}</small></span>{member.role==='owner'&&<span className="owner-pill">OWNER</span>}</div>)}</div>
+      <div className="challenge-section"><div className="challenge-heading"><div><span className="eyebrow">SQUAD QUESTS</span><h3>Challenges</h3><p>Shared goals. Individual progress. One leaderboard.</p></div><Trophy size={24}/></div>
+      {selected.role==='owner'&&<form className="challenge-create" onSubmit={createChallenge}><div className="eyebrow">CREATE A CHALLENGE</div><label>Challenge title<input value={challengeTitle} onChange={e=>setChallengeTitle(e.target.value)} placeholder="e.g. Read 100 pages" maxLength={80} required/></label><label>Description <input value={challengeDescription} onChange={e=>setChallengeDescription(e.target.value)} placeholder="What are we aiming for?" maxLength={240}/></label><div className="challenge-fields"><label>Target<input type="number" min="1" max="100000" value={challengeTarget} onChange={e=>setChallengeTarget(e.target.value)} required/></label><label>Unit<input value={challengeUnit} onChange={e=>setChallengeUnit(e.target.value)} maxLength={24} placeholder="pages" required/></label></div><button className="primary" type="submit" disabled={busy}>{busy?'Saving…':'Launch challenge'} <ArrowRight size={15}/></button></form>}
+      {challenges.length===0?<div className="challenge-empty">No active challenges yet.{selected.role==='owner'?' Create the first one above.':' The squad owner can launch one anytime.'}</div>:challenges.map(challenge=>{const ranked=[...members].sort((a,b)=>(challenge.progress[b.uid]||0)-(challenge.progress[a.uid]||0));return <article className="challenge-card" key={challenge.id}><div className="challenge-card-top"><div><h4>{challenge.title}</h4>{challenge.description&&<p>{challenge.description}</p>}</div><span>{challenge.target} {challenge.unit}</span></div><button className="secondary challenge-progress-button" onClick={()=>void addProgress(challenge.id)} disabled={busy||(challenge.progress[user.uid]||0)>=challenge.target}>+1 {challenge.unit} · Update my progress</button><div className="challenge-board"><div className="eyebrow">LEADERBOARD</div>{ranked.map((member,index)=>{const value=challenge.progress[member.uid]||0;return <div className="challenge-rank" key={member.uid}><span className="rank-number">{index+1}</span><span className="rank-name">{member.displayName}{member.uid===user.uid?' (you)':''}</span><div className="rank-track"><i style={{width:`${Math.min(100,value/challenge.target*100)}%`}}/></div><b>{value}/{challenge.target}</b></div>})}</div></article>})}
+      </div></>}</section></div>
     <div className="squad-note"><ShieldCheck size={15}/> Private by default. Your full timetable and notes are never shared with your squad.</div>
   </div>
 }
