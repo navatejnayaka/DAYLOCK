@@ -295,8 +295,8 @@ function App() {
       setWeeklyInsights(Array.from({ length: 7 }, (_, index) => ({
         dateKey: localDateKey(index - 6),
         label: new Intl.DateTimeFormat('en-IN', { weekday: 'short' }).format(new Date(localDateKey(index - 6) + 'T12:00:00')),
-        totalTasks: sample[index][0],
-        completedTasks: sample[index][1],
+        totalTasks: sample[index].tasks[0],
+        completedTasks: sample[index].tasks[1],
         habitCheckins: sample[index].habits,
       })))
       return
