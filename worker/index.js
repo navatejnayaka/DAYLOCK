@@ -50,7 +50,7 @@ function encodeFields(value) {
 }
 
 function isValidDateKey(value) {
-  if (typeof value !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return false;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [year, month, day] = value.split("-").map(Number);
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
@@ -82,8 +82,8 @@ function validateTasks(value) {
     if (!((typeof id === "string" && id.length >= 1 && id.length <= 80) || (typeof id === "number" && Number.isSafeInteger(id)))) throw new Error(`Task ${index + 1} has an invalid ID.`);
     if (typeof title !== "string" || title.trim().length < 1 || title.length > 100) throw new Error(`Task ${index + 1} needs a title up to 100 characters.`);
     if (typeof category !== "string" || category.length > 40) throw new Error(`Task ${index + 1} has an invalid category.`);
-    if (typeof start !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(start)) throw new Error(`Task ${index + 1} has an invalid start time.`);
-    if (typeof end !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(end) || end <= start) throw new Error(`Task ${index + 1} has an invalid end time.`);
+    if (typeof start !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(start)) throw new Error(`Task ${index + 1} has an invalid start time.`);
+    if (typeof end !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(end) || end <= start) throw new Error(`Task ${index + 1} has an invalid end time.`);
     if (!validStatuses.has(status)) throw new Error(`Task ${index + 1} has an invalid status.`);
     if (note !== undefined && (typeof note !== "string" || note.length > 160)) throw new Error(`Task ${index + 1} has an invalid note.`);
     return { id, title: title.trim(), category, start, end, status, ...(note ? { note } : {}) };
@@ -114,7 +114,7 @@ async function verifyFirebaseIdToken(token) {
     if (!response.ok) throw new Error("Could not retrieve Firebase token verification certificates.");
     certCache = await response.json();
     const cacheControl = response.headers.get("cache-control") || "";
-    const maxAge = Number(cacheControl.match(/max-age=(\\d+)/)?.[1] || 300);
+    const maxAge = Number(cacheControl.match(/max-age=(\d+)/)?.[1] || 300);
     certCacheUntil = now + Math.max(60, Math.min(maxAge, 3600)) * 1000;
   }
 
