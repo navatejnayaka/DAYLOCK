@@ -129,6 +129,8 @@ function App() {
   const [taskEnd, setTaskEnd] = useState('10:00')
   const [toast, setToast] = useState('')
   const [showSettings, setShowSettings] = useState(false)
+  const [profileName, setProfileName] = useState('')
+  const [profileSaving, setProfileSaving] = useState(false)
   const [reminders, setReminders] = useState<ReminderSettings>(defaultReminders)
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | 'unsupported'>('default')
   const completed = tasks.filter(task => task.status === 'Completed').length
@@ -156,6 +158,23 @@ function App() {
       unsubscribe?.()
     }
   }, [])
+
+  useEffect(() => { setProfileName(currentUser?.displayName || '') }, [currentUser?.uid, currentUser?.displayName])
+
+  const saveProfile = async () => {
+    if (!currentUser) { notify('Sign in to edit your profile.'); return }
+    const name = profileName.trim()
+    if (name.length < 2 || name.length > 40) { notify('Display name must be between 2 and 40 characters.'); return }
+    setProfileSaving(true)
+    try {
+      await updateProfile(currentUser, { displayName: name })
+      await currentUser.reload()
+      setCurrentUser(auth.currentUser)
+      notify('Profile updated successfully.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not update your profile.')
+    } finally { setProfileSaving(false) }
+  }
 
   const reminderStorageKey = 'daylock-reminders-' + (currentUser?.uid || 'guest')
   useEffect(() => {
@@ -725,6 +744,9 @@ function App() {
       </main>
       {showSettings && <div className="modal-backdrop"><section className="task-form panel settings-form" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <button type="button" className="close-form" onClick={() => setShowSettings(false)} aria-label="Close settings"><X/></button>
+        <div className="eyebrow">YOUR ACCOUNT</div><h2>Profile settings</h2>
+        <div className="profile-settings"><label>Display name<input type="text" value={profileName} onChange={event => setProfileName(event.target.value)} minLength={2} maxLength={40} placeholder="Your display name"/></label><label>Email address<input type="email" value={currentUser?.email || ""} readOnly disabled/></label><button type="button" className="secondary" onClick={() => void saveProfile()} disabled={profileSaving || !currentUser || profileName.trim().length < 2}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
+        <div className="settings-divider"/>
         <div className="eyebrow">PERSONALISE YOUR DAYLOCK</div><h2 id="settings-title">Reminder settings</h2>
         <p className="override-explainer">Background reminders can arrive while DAYLOCK is closed on this device. Times use your device local timezone.</p>
         <div className="notification-permission"><div><b>Browser notifications</b><span>{notificationPermission === "granted" ? "Enabled" : notificationPermission === "denied" ? "Blocked in browser settings" : notificationPermission === "unsupported" ? "Not supported by this browser" : "Permission not enabled"}</span></div><button type="button" className="secondary" onClick={() => void enableBrowserNotifications()} disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}>{notificationPermission === "granted" ? "Enabled" : "Enable"}</button></div>
