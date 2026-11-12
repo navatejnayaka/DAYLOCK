@@ -77,7 +77,23 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    match /users/{userId}/quests/{questId} {
+
+      match /challenges/{challengeId} {
+        allow get, list: if isMember(squadId);
+        allow create: if isOwner(squadId)
+          && request.resource.data.keys().hasOnly(['title', 'description', 'target', 'unit', 'status', 'createdBy', 'createdAt'])
+          && request.resource.data.title is string && request.resource.data.title.size() >= 3 && request.resource.data.title.size() <= 80
+          && request.resource.data.description is string && request.resource.data.description.size() <= 240
+          && request.resource.data.target is int && request.resource.data.target >= 1 && request.resource.data.target <= 100000
+          && request.resource.data.unit is string && request.resource.data.unit.size() >= 1 && request.resource.data.unit.size() <= 24
+          && request.resource.data.status == 'active' && request.resource.data.createdBy == uid() && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+        match /progress/{memberId} {
+          allow get, list: if isMember(squadId);
+          allow create, update, delete: if false;
+        }
+      }
+\n    match /users/{userId}/quests/{questId} {
       allow get, list: if signedIn() && userId == uid();
       allow create: if signedIn()
         && userId == uid()
