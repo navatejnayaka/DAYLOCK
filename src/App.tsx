@@ -27,6 +27,15 @@ type Task = { id: number | string; title: string; category: string; start: strin
 type Quest = { id: string | number; title: string; category: string; progress: number; target: number; unit: string; reward?: number }
 type Habit = { id: string; title: string; category: string }
 type InsightDay = { dateKey: string; label: string; totalTasks: number; completedTasks: number; habitCheckins: number }
+type ReminderKey = 'planning' | 'hydration' | 'meal' | 'habit'
+type ReminderSettings = Record<ReminderKey, { enabled: boolean; time: string }>
+const defaultReminders: ReminderSettings = { planning: { enabled: true, time: '21:30' }, hydration: { enabled: false, time: '11:00' }, meal: { enabled: false, time: '13:00' }, habit: { enabled: false, time: '19:00' } }
+const reminderLabels: Record<ReminderKey, { title: string; detail: string; message: string }> = {
+  planning: { title: 'Plan tomorrow', detail: 'A gentle evening planning reminder', message: 'Take a few minutes to plan tomorrow in DAYLOCK.' },
+  hydration: { title: 'Hydration', detail: 'A reminder to take a water break', message: 'Time for a water break. Stay comfortably hydrated.' },
+  meal: { title: 'Meal reminder', detail: 'A flexible reminder for your meal routine', message: 'Meal-time check-in: take a break and have your planned meal.' },
+  habit: { title: 'Daily habits', detail: 'Check in on the habits you chose', message: 'Your daily habit check-in is ready in DAYLOCK.' },
+}
 
 function normalizeQuests(items: Array<Record<string, unknown>>): Quest[] {
   return items.flatMap(item => {
@@ -118,6 +127,9 @@ function App() {
   const [taskStart, setTaskStart] = useState('09:00')
   const [taskEnd, setTaskEnd] = useState('10:00')
   const [toast, setToast] = useState('')
+  const [showSettings, setShowSettings] = useState(false)
+  const [reminders, setReminders] = useState<ReminderSettings>(defaultReminders)
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission | 'unsupported'>('default')
   const completed = tasks.filter(task => task.status === 'Completed').length
   const percent = tasks.length ? Math.round(completed / tasks.length * 100) : 0
   const today = useMemo(() => new Intl.DateTimeFormat('en-IN', { weekday: 'long', day: 'numeric', month: 'long' }).format(new Date()), [])
@@ -144,6 +156,50 @@ function App() {
     }
   }, [])
 
+  const reminderStorageKey = 'daylock-reminders-' + (currentUser?.uid || 'guest')
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(reminderStorageKey)
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<ReminderSettings>
+        setReminders({ planning: { ...defaultReminders.planning, ...parsed.planning }, hydration: { ...defaultReminders.hydration, ...parsed.hydration }, meal: { ...defaultReminders.meal, ...parsed.meal }, habit: { ...defaultReminders.habit, ...parsed.habit } })
+      } else setReminders(defaultReminders)
+    } catch { setReminders(defaultReminders) }
+    setNotificationPermission('Notification' in window ? Notification.permission : 'unsupported')
+  }, [reminderStorageKey])
+
+  useEffect(() => {
+    try { localStorage.setItem(reminderStorageKey, JSON.stringify(reminders)) } catch { /* Storage may be unavailable in private browsing. */ }
+  }, [reminderStorageKey, reminders])
+
+  useEffect(() => {
+    if (!enteredApp || demo) return
+    const checkReminders = () => {
+      const now = new Date()
+      const dateKey = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0')
+      const timeKey = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0')
+      ;(Object.keys(reminders) as ReminderKey[]).forEach(key => {
+        const reminder = reminders[key]
+        if (!reminder.enabled || reminder.time !== timeKey) return
+        const firedKey = 'daylock-reminder-fired-' + (currentUser?.uid || 'guest') + '-' + key
+        if (localStorage.getItem(firedKey) === dateKey) return
+        localStorage.setItem(firedKey, dateKey)
+        const content = reminderLabels[key]
+        if ('Notification' in window && Notification.permission === 'granted') new Notification('DAYLOCK · ' + content.title, { body: content.message, tag: 'daylock-' + key + '-' + dateKey })
+        else setToast(content.title + ': ' + content.message)
+      })
+    }
+    checkReminders()
+    const timer = window.setInterval(checkReminders, 15000)
+    return () => window.clearInterval(timer)
+  }, [enteredApp, demo, currentUser?.uid, reminders])
+
+  const enableBrowserNotifications = async () => {
+    if (!('Notification' in window)) { setNotificationPermission('unsupported'); return }
+    const permission = await Notification.requestPermission()
+    setNotificationPermission(permission)
+    notify(permission === 'granted' ? 'Browser notifications enabled.' : permission === 'denied' ? 'Notifications are blocked in your browser settings.' : 'Notification permission was not granted.')
+  }
   const authenticate = async (mode: AuthMode, email: string, password: string, displayName: string) => {
     await authPersistenceReady
     const normalizedEmail = email.trim().toLowerCase()
@@ -631,7 +687,7 @@ function App() {
         <div className="sidebar-bottom"><div className="realm-mini"><Sprout/><div><b>{demo ? 'Explorer' : currentUser?.displayName || 'DAYLOCK Member'}</b><span>{demo ? 'Demo profile' : currentUser?.email || 'Signed in'}</span></div><span className="level">Lv. 1</span></div><div className="side-note"><ShieldCheck size={15}/> {demo ? 'Sample data · isolated demo' : 'Signed in · personal account'}</div><button className="leave-demo" onClick={demo ? leaveDemo : () => { void handleSignOut().catch(() => notify('Could not sign out. Please try again.')) }}>{demo ? 'Exit demo' : 'Sign out'} <ArrowUpRight size={14}/></button></div>
       </aside>
       <main className="main-area">
-        <header className="topbar"><button className="mobile-menu" onClick={() => setMobileMenu(true)}><Menu/></button><div className="crumb">DAYLOCK <span>/</span> {nav.find(item => item.id === screen)?.label}</div><div className="top-actions"><div className="demo-pill"><span/> {demo ? 'ISOLATED DEMO' : 'ACCOUNT ACTIVE'}</div><button className="icon-button" aria-label="Search"><Search size={17}/></button><button className="icon-button" aria-label="Settings"><Settings size={18}/></button></div></header>
+        <header className="topbar"><button className="mobile-menu" onClick={() => setMobileMenu(true)}><Menu/></button><div className="crumb">DAYLOCK <span>/</span> {nav.find(item => item.id === screen)?.label}</div><div className="top-actions"><div className="demo-pill"><span/> {demo ? 'ISOLATED DEMO' : 'ACCOUNT ACTIVE'}</div><button className="icon-button" aria-label="Search"><Search size={17}/></button><button className="icon-button" aria-label="Settings" onClick={() => setShowSettings(true)}><Settings size={18}/></button></div></header>
         {screen === 'home' && <div className="content">
           <section className="hero-panel"><div className="hero-copy"><div className="eyebrow"><span className="pulse"/> YOUR NEXT CHAPTER BEGINS</div><h1>Make room for<br/><em>your next chapter.</em></h1><p>Plan tomorrow with intention. Show up for today. Let the small wins become your story.</p><div className="hero-actions"><button className="primary" onClick={() => { setDayTarget('tomorrow'); goScreen('day') }}>Plan tomorrow <ArrowRight size={16}/></button><button className="secondary" onClick={() => goScreen('growth')}>Explore Growth World <Compass size={16}/></button></div></div><HeroLandscape/></section>
           <div className="welcome-row"><div><div className="eyebrow">{today.toUpperCase()} · DAILY CHECK-IN</div><h2>{demo ? 'Welcome, Explorer.' : `Welcome, ${currentUser?.displayName || currentUser?.email?.split('@')[0] || 'there'}.`}</h2><p>{demo ? 'A safe sample world to explore.' : 'Your personal DAYLOCK account is ready. Start by planning tomorrow.'}</p></div><div className="fresh-pill"><Sparkles size={16}/> {demo ? 'Sample profile · Level 1' : `Level ${level} · ${xpTotal} XP`}</div></div>
@@ -644,6 +700,14 @@ function App() {
         {screen === 'squad' && currentUser && <SquadCenter user={currentUser}/>} 
         {screen === 'insights' && <div className="content"><div className="page-heading"><div className="eyebrow">LOOK HOW FAR YOU'VE COME</div><h1>Insights</h1><p>Your real activity over the last seven days.</p></div><div className="stat-grid"><Stat icon={<Target/>} label="Tasks completed · 7 days" value={insightsLoading ? '…' : `${weeklyInsights.reduce((sum, day) => sum + day.completedTasks, 0)}`} sub={demo ? 'Illustrative demo activity' : `${weeklyInsights.reduce((sum, day) => sum + day.totalTasks, 0)} scheduled tasks found`}/><Stat icon={<Flame/>} label="Habit check-ins · 7 days" value={insightsLoading ? '…' : `${weeklyInsights.reduce((sum, day) => sum + day.habitCheckins, 0)}`} sub={demo ? 'Illustrative demo activity' : 'Saved daily habit completions'}/><Stat icon={<Flame/>} label="Current streak" value={demo ? '3 days' : `${currentStreak} days`} sub={demo ? 'Illustrative demo streak' : 'Consecutive days with a habit check-in'}/><Stat icon={<Trophy/>} label="Longest streak" value={demo ? '7 days' : `${longestStreak} days`} sub={demo ? 'Illustrative demo record' : 'Your best consecutive run'}/><Stat icon={<Trophy/>} label="Journey XP" value={demo ? '840 sample XP' : `${xpTotal} XP`} sub={demo ? 'Illustrative demo data' : `Level ${level} · Saved to your account`}/></div><div className="panel chart-panel"><PanelTitle icon={<BarChart3/>} title="Daily task completion · last 7 days"/>{insightsLoading ? <div className="empty-state"><b>Loading your activity…</b></div> : weeklyInsights.some(day => day.totalTasks > 0) ? <><div className="bars">{weeklyInsights.map(day => { const rate = day.totalTasks ? Math.round(day.completedTasks / day.totalTasks * 100) : 0; return <div className="bar-column" key={day.dateKey}><div className="bar-track" title={`${day.completedTasks} of ${day.totalTasks} tasks completed`}><i style={{height:`${rate}%`}}/></div><small>{day.label}</small></div> })}</div><div className="panel-footnote">Bars show the share of scheduled tasks marked Completed each day.</div></> : <div className="empty-state"><div className="empty-icon"><BarChart3/></div><b>No timetable activity yet.</b><p>Save a daily timetable and update task statuses to see your progress here.</p></div>}</div><div className="panel chart-panel"><PanelTitle icon={<Sprout/>} title="Daily habit check-ins · last 7 days"/>{insightsLoading ? <div className="empty-state"><b>Loading your habits…</b></div> : <div className="insight-days">{weeklyInsights.map(day => <div className="insight-day" key={day.dateKey}><span>{day.label}</span><b>{day.habitCheckins}</b><small>{day.habitCheckins === 1 ? 'habit' : 'habits'}</small></div>)}</div>}</div></div>}
       </main>
+      {showSettings && <div className="modal-backdrop"><section className="task-form panel settings-form" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <button type="button" className="close-form" onClick={() => setShowSettings(false)} aria-label="Close settings"><X/></button>
+        <div className="eyebrow">PERSONALISE YOUR DAYLOCK</div><h2 id="settings-title">Reminder settings</h2>
+        <p className="override-explainer">Reminders run while DAYLOCK is open in this browser. Times use your device local timezone. Settings are saved on this device.</p>
+        <div className="notification-permission"><div><b>Browser notifications</b><span>{notificationPermission === "granted" ? "Enabled" : notificationPermission === "denied" ? "Blocked in browser settings" : notificationPermission === "unsupported" ? "Not supported by this browser" : "Permission not enabled"}</span></div><button type="button" className="secondary" onClick={() => void enableBrowserNotifications()} disabled={notificationPermission === "granted" || notificationPermission === "unsupported"}>{notificationPermission === "granted" ? "Enabled" : "Enable"}</button></div>
+        <div className="reminder-list">{(Object.keys(reminders) as ReminderKey[]).map(key => <div className="reminder-setting" key={key}><label className="reminder-toggle"><input type="checkbox" checked={reminders[key].enabled} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], enabled: event.target.checked } }))}/><span><b>{reminderLabels[key].title}</b><small>{reminderLabels[key].detail}</small></span></label><input aria-label={reminderLabels[key].title + " time"} type="time" value={reminders[key].time} onChange={event => setReminders(old => ({ ...old, [key]: { ...old[key], time: event.target.value } }))}/></div>)}</div>
+        <button className="primary" type="button" onClick={() => setShowSettings(false)}>Save reminder settings <Check size={15}/></button>
+      </section></div>}
       {toast && <div className="toast"><Check size={16}/>{toast}</div>}
       {mobileMenu && <button className="scrim" onClick={() => setMobileMenu(false)} aria-label="Close navigation"/>}
     </div>
