@@ -5,6 +5,7 @@ import {
   setPersistence,
 } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
+import { getMessaging, isSupported } from 'firebase/messaging'
 
 // Firebase's web config identifies this project. It is not a service-account key.
 // Secure access through Authentication and Firestore Security Rules, not by hiding this config.
@@ -22,3 +23,9 @@ const app = getApps().length ? getApp() : initializeApp(firebaseConfig)
 export const auth = getAuth(app)
 export const db = getFirestore(app)
 export const authPersistenceReady = setPersistence(auth, browserLocalPersistence)
+
+export const vapidPublicKey = 'BGt9MBYqoQv2iquy9iZaNlyBnT80D4jyeMOGTh_AbxUFzZ5r13DDYYTho647JTc__--m7CbG02FWZ05Zk8CgfN8'
+export async function getDaylockMessaging() {
+  if (!(await isSupported())) return null
+  return getMessaging(app)
+}
