@@ -8,6 +8,7 @@ import {
   reauthenticateWithCredential,
   onAuthStateChanged,
   sendPasswordResetEmail,
+  sendEmailVerification,
   signInWithEmailAndPassword,
   signOut,
   updateProfile,
@@ -134,6 +135,8 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [profileName, setProfileName] = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
+  const [emailVerified, setEmailVerified] = useState(false)
+  const [verificationSending, setVerificationSending] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deletePassword, setDeletePassword] = useState('')
   const [deletePhrase, setDeletePhrase] = useState('')
@@ -167,6 +170,7 @@ function App() {
   }, [])
 
   useEffect(() => { setProfileName(currentUser?.displayName || '') }, [currentUser?.uid, currentUser?.displayName])
+  useEffect(() => { setEmailVerified(Boolean(currentUser?.emailVerified)) }, [currentUser?.uid, currentUser?.emailVerified])
 
   const saveProfile = async () => {
     if (!currentUser) { notify('Sign in to edit your profile.'); return }
@@ -181,6 +185,29 @@ function App() {
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not update your profile.')
     } finally { setProfileSaving(false) }
+  }
+
+  const resendVerificationEmail = async () => {
+    if (!currentUser) return
+    setVerificationSending(true)
+    try {
+      await sendEmailVerification(currentUser)
+      notify('Verification email sent. Check your inbox and spam folder.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not send the verification email.')
+    } finally { setVerificationSending(false) }
+  }
+
+  const refreshVerificationStatus = async () => {
+    if (!currentUser) return
+    try {
+      await currentUser.reload()
+      const verified = Boolean(auth.currentUser?.emailVerified)
+      setEmailVerified(verified)
+      notify(verified ? 'Email address verified successfully.' : 'Email is not verified yet. Open the link in your inbox first.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not refresh verification status.')
+    }
   }
 
   const cancelAccountDeletion = () => {
@@ -794,7 +821,7 @@ function App() {
       {showSettings && <div className="modal-backdrop"><section className="task-form panel settings-form" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <button type="button" className="close-form" onClick={() => setShowSettings(false)} aria-label="Close settings"><X/></button>
         <div className="eyebrow">YOUR ACCOUNT</div><h2>Profile settings</h2>
-        <div className="profile-settings"><label>Display name<input type="text" value={profileName} onChange={event => setProfileName(event.target.value)} minLength={2} maxLength={40} placeholder="Your display name"/></label><label>Email address<input type="email" value={currentUser?.email || ""} readOnly disabled/></label><button type="button" className="secondary" onClick={() => void saveProfile()} disabled={profileSaving || !currentUser || profileName.trim().length < 2}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
+        <div className="profile-settings"><div className="email-verification"><div><b>Email verification</b><span className={emailVerified ? "verification-status is-verified" : "verification-status"}>{emailVerified ? "Verified" : "Not verified"}</span></div><div className="verification-actions"><button type="button" className="secondary" onClick={() => void resendVerificationEmail()} disabled={!currentUser || emailVerified || verificationSending}>{verificationSending ? "Sending…" : "Resend email"}</button><button type="button" className="secondary" onClick={() => void refreshVerificationStatus()} disabled={!currentUser}>Refresh status</button></div></div><label>Display name<input type="text" value={profileName} onChange={event => setProfileName(event.target.value)} minLength={2} maxLength={40} placeholder="Your display name"/></label><label>Email address<input type="email" value={currentUser?.email || ""} readOnly disabled/></label><button type="button" className="secondary" onClick={() => void saveProfile()} disabled={profileSaving || !currentUser || profileName.trim().length < 2}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
         <div className="settings-divider"/>
         <div className="eyebrow">PERSONALISE YOUR DAYLOCK</div><h2 id="settings-title">Reminder settings</h2>
         <p className="override-explainer">Background reminders can arrive while DAYLOCK is closed on this device. Times use your device local timezone.</p>
