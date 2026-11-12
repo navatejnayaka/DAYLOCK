@@ -346,7 +346,7 @@ function App() {
       document.body.appendChild(anchor)
       anchor.click()
       anchor.remove()
-      URL.revokeObjectURL(url)
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       notify('Your DAYLOCK data export is ready.')
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not export your DAYLOCK data.')
