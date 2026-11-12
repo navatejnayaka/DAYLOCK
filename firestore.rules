@@ -83,6 +83,13 @@ service cloud.firestore {
       // which enforces the local-midnight lock before using its server identity.
       allow get, list: if signedIn() && userId == uid();
       allow create, update, delete: if false;
+
+      match /audit/{auditId} {
+        // Owners can review their own audit history. Clients cannot create,
+        // edit, or delete records; the authenticated Worker appends snapshots.
+        allow get, list: if signedIn() && userId == uid();
+        allow create, update, delete: if false;
+      }
     }
 
     match /squadInvites/{inviteCode} {
