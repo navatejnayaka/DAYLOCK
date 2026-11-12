@@ -407,6 +407,155 @@ async function emergencyOverride(request, env, uid) {
   }
 }
 
+
+async function advanceQuest(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    return json({ error: "The DAYLOCK progress service is not configured yet." }, 503);
+  }
+
+  let body;
+  try {
+    if (Number(request.headers.get("content-length") || 0) > 4_000) return json({ error: "Request is too large." }, 413);
+    body = await request.json();
+  } catch {
+    return json({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  const { questId } = body || {};
+  if (typeof questId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(questId)) {
+    return json({ error: "Invalid quest identifier." }, 400);
+  }
+
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) {
+      return json({ error: "The DAYLOCK server credential is not configured correctly." }, 503);
+    }
+  } catch {
+    return json({ error: "The DAYLOCK server credential is not valid JSON." }, 503);
+  }
+
+  try {
+    const accessToken = await getGoogleAccessToken(serviceAccount);
+    const base = `projects/${PROJECT_ID}/databases/(default)/documents`;
+    const questName = `${base}/users/${uid}/quests/${questId}`;
+    const profileName = `${base}/users/${uid}/progress/stats`;
+    const eventId = `quest_${questId}_complete`;
+    const eventName = `${base}/users/${uid}/xpEvents/${eventId}`;
+    const [questResponse, profileResponse, eventResponse] = await Promise.all([
+      firestoreRequest(`https://firestore.googleapis.com/v1/${questName}`, accessToken),
+      firestoreRequest(`https://firestore.googleapis.com/v1/${profileName}`, accessToken),
+      firestoreRequest(`https://firestore.googleapis.com/v1/${eventName}`, accessToken),
+    ]);
+
+    if (questResponse.status === 404) return json({ error: "This quest no longer exists." }, 404);
+    if (!questResponse.ok) return json({ error: "Could not load this quest." }, 502);
+    if (!profileResponse.ok && profileResponse.status !== 404) return json({ error: "Could not load your XP balance." }, 502);
+    if (!eventResponse.ok && eventResponse.status !== 404) return json({ error: "Could not verify the quest reward record." }, 502);
+
+    const questDocument = await questResponse.json();
+    const quest = decodeFields(questDocument.fields);
+    const progress = Number(quest.progress);
+    const target = Number(quest.target);
+    if (!Number.isInteger(progress) || !Number.isInteger(target) || target < 1 || progress < 0 || progress > target) {
+      return json({ error: "This quest has invalid progress data." }, 409);
+    }
+
+    const profileDocument = profileResponse.ok ? await profileResponse.json() : null;
+    const profile = profileDocument ? decodeFields(profileDocument.fields) : {};
+    const currentXp = Number.isInteger(Number(profile.xpTotal)) && Number(profile.xpTotal) >= 0 ? Number(profile.xpTotal) : 0;
+
+    if (eventResponse.ok) {
+      return json({
+        ok: true,
+        alreadyAwarded: true,
+        progress,
+        xpAwarded: 0,
+        xpTotal: currentXp,
+        level: Math.floor(currentXp / 100) + 1,
+      });
+    }
+    if (progress >= target) {
+      return json({ ok: true, completed: true, progress, xpAwarded: 0, xpTotal: currentXp, level: Math.floor(currentXp / 100) + 1 });
+    }
+
+    const nextProgress = Math.min(target, progress + 1);
+    const completed = nextProgress >= target;
+    const rewardXp = completed ? 25 : 0;
+    const nextXp = currentXp + rewardXp;
+    const nextLevel = Math.floor(nextXp / 100) + 1;
+    const timestamp = new Date().toISOString();
+    const writes = [
+      {
+        update: {
+          name: questName,
+          fields: encodeFields({ progress: nextProgress, updatedAt: timestamp }),
+        },
+        updateMask: { fieldPaths: ["progress", "updatedAt"] },
+        currentDocument: { updateTime: questDocument.updateTime },
+      },
+    ];
+
+    if (completed) {
+      const profileFields = {
+        xpTotal: nextXp,
+        level: nextLevel,
+        updatedAt: timestamp,
+        ...(!profileDocument ? { createdAt: timestamp } : {}),
+      };
+      writes.push({
+        update: { name: profileName, fields: encodeFields(profileFields) },
+        updateMask: { fieldPaths: Object.keys(profileFields) },
+        currentDocument: profileDocument ? { updateTime: profileDocument.updateTime } : { exists: false },
+      });
+      writes.push({
+        update: {
+          name: eventName,
+          fields: encodeFields({
+            eventId,
+            type: "quest_completed",
+            questId,
+            questTitle: String(quest.title || "").slice(0, 100),
+            category: String(quest.category || "").slice(0, 30),
+            rewardXp,
+            awardedAt: timestamp,
+          }),
+        },
+        currentDocument: { exists: false },
+      });
+    }
+
+    const commitUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:commit`;
+    const commitResponse = await firestoreRequest(commitUrl, accessToken, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ writes }),
+    });
+    if (!commitResponse.ok) {
+      const detail = await commitResponse.text();
+      console.error("DAYLOCK quest progress commit failed", commitResponse.status, detail.slice(0, 800));
+      return json({
+        error: commitResponse.status === 409 || commitResponse.status === 400
+          ? "Your quest changed at the same time. Refresh and try again."
+          : "Could not save quest progress. Please retry.",
+      }, commitResponse.status === 409 || commitResponse.status === 400 ? 409 : 502);
+    }
+
+    return json({
+      ok: true,
+      completed,
+      progress: nextProgress,
+      xpAwarded: rewardXp,
+      xpTotal: nextXp,
+      level: nextLevel,
+    });
+  } catch (error) {
+    console.error("DAYLOCK quest progress failed", error);
+    return json({ error: "The progress service could not complete this update. Please retry." }, 502);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -416,7 +565,7 @@ export default {
         return json({ ok: true, service: "daylock-schedule-api", configured: Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON) });
       }
       if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override") return json({ error: "Not found." }, 404);
+      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
@@ -426,9 +575,9 @@ export default {
 
       try {
         const uid = await verifyFirebaseIdToken(match[1]);
-        return url.pathname === "/api/schedules/override"
-          ? await emergencyOverride(request, env, uid)
-          : await saveSchedule(request, env, uid);
+        if (url.pathname === "/api/schedules/override") return await emergencyOverride(request, env, uid);
+        if (url.pathname === "/api/quests/progress") return await advanceQuest(request, env, uid);
+        return await saveSchedule(request, env, uid);
       } catch (error) {
         console.warn("DAYLOCK request authentication failed", error);
         return json({ error: "Your session could not be verified. Sign in again and retry." }, 401);
