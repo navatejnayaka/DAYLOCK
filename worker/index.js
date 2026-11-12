@@ -826,6 +826,7 @@ async function listReminderDevices(request, env, uid) {
         timezone: typeof data.timezone === "string" ? data.timezone : "Unknown",
         updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : null,
         enabledReminders: Object.entries(data.reminders || {}).filter(([, item]) => item?.enabled === true).map(([key]) => key),
+        reminders: data.reminders && typeof data.reminders === "object" ? data.reminders : {},
       };
     });
     return json({ ok: true, devices });
