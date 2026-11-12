@@ -8,8 +8,7 @@ const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
 
 let certCache = null;
 let certCacheUntil = 0;
-let serviceToken = null;
-let serviceTokenUntil = 0;
+const serviceTokens = new Map();
 let serviceKeyPromise = null;
 
 function json(data, status = 200) {
@@ -133,12 +132,13 @@ async function verifyFirebaseIdToken(token) {
   return payload.sub;
 }
 
-async function getGoogleAccessToken(serviceAccount) {
+async function getGoogleAccessToken(serviceAccount, scope = FIRESTORE_SCOPE) {
   const now = Date.now();
-  if (serviceToken && now < serviceTokenUntil - 60_000) return serviceToken;
+  const cached = serviceTokens.get(scope);
+  if (cached && now < cached.until - 60_000) return cached.token;
   if (!serviceKeyPromise) serviceKeyPromise = importPKCS8(serviceAccount.private_key, "RS256");
   const key = await serviceKeyPromise;
-  const assertion = await new SignJWT({ scope: FIRESTORE_SCOPE })
+  const assertion = await new SignJWT({ scope })
     .setProtectedHeader({ alg: "RS256", typ: "JWT" })
     .setIssuer(serviceAccount.client_email)
     .setAudience(TOKEN_URL)
@@ -156,9 +156,8 @@ async function getGoogleAccessToken(serviceAccount) {
   });
   const result = await response.json();
   if (!response.ok || !result.access_token) throw new Error("Google could not issue the Firestore access token.");
-  serviceToken = result.access_token;
-  serviceTokenUntil = now + Number(result.expires_in || 3600) * 1000;
-  return serviceToken;
+  serviceTokens.set(scope, { token: result.access_token, until: now + Number(result.expires_in || 3600) * 1000 });
+  return result.access_token;
 }
 
 async function firestoreRequest(url, accessToken, options = {}) {
@@ -678,7 +677,97 @@ async function updateSquadChallengeProgress(request, env, uid) {
   } catch(error) { console.error("DAYLOCK squad challenge progress failed",error); return json({error:"The squad challenge service could not complete this update."},502); }
 }
 
+
+const FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
+const FCM_ENDPOINT = `https://fcm.googleapis.com/v1/projects/${PROJECT_ID}/messages:send`;
+const REMINDER_COPY = {
+  planning: ["Plan tomorrow", "Take a few minutes to plan tomorrow in DAYLOCK."],
+  hydration: ["Hydration", "Time for a water break. Stay comfortably hydrated."],
+  meal: ["Meal reminder", "Take a break and have your planned meal."],
+  habit: ["Daily habits", "Your daily habit check-in is ready in DAYLOCK."]
+};
+
+async function registerReminders(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The reminder service is not configured." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "Request body must be valid JSON." }, 400); }
+  const { token, timezone, reminders } = body || {};
+  if (typeof token !== "string" || token.length < 20 || token.length > 4096) return json({ error: "Invalid push token." }, 400);
+  if (typeof timezone !== "string" || timezone.length > 80) return json({ error: "Invalid timezone." }, 400);
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); } catch { return json({ error: "Invalid timezone." }, 400); }
+  const keys = ["planning", "hydration", "meal", "habit"];
+  if (!reminders || typeof reminders !== "object") return json({ error: "Reminder settings are missing." }, 400);
+  const safe = {};
+  for (const key of keys) {
+    const item = reminders[key];
+    if (!item || typeof item.enabled !== "boolean" || typeof item.time !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(item.time)) return json({ error: "Invalid reminder settings." }, 400);
+    safe[key] = { enabled: item.enabled, time: item.time };
+  }
+  let serviceAccount;
+  try { serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON); } catch { return json({ error: "Reminder service credentials are invalid." }, 503); }
+  try {
+    const access = await getGoogleAccessToken(serviceAccount);
+    const name = `projects/${PROJECT_ID}/databases/(default)/documents/users/${uid}/reminderSettings/main`;
+    const payload = { fields: encodeFields({ uid, token, timezone, reminders: safe, updatedAt: new Date().toISOString() }) };
+    const response = await firestoreRequest(`https://firestore.googleapis.com/v1/${name}`, access, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(payload)
+    });
+    if (!response.ok) { console.error("Reminder settings save failed", response.status, (await response.text()).slice(0,500)); return json({ error: "Could not save background reminder settings." }, 502); }
+    return json({ ok: true });
+  } catch (error) { console.error("Reminder registration failed", error); return json({ error: "Could not register this device for reminders." }, 502); }
+}
+
+async function sendReminder(env, access, token, title, body, tag) {
+  const response = await fetch(FCM_ENDPOINT, {
+    method: "POST",
+    headers: { authorization: `Bearer ${access}`, "content-type": "application/json" },
+    body: JSON.stringify({ message: { token, notification: { title: `DAYLOCK · ${title}`, body }, data: { tag, url: "/" }, webpush: { headers: { TTL: "3600" } } } })
+  });
+  if (!response.ok) console.error("FCM delivery failed", response.status, (await response.text()).slice(0,500));
+  return response.ok;
+}
+
+async function runScheduledReminders(env) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return;
+  let serviceAccount;
+  try { serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON); } catch { return; }
+  try {
+    const access = await getGoogleAccessToken(serviceAccount);
+    const queryUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:runQuery`;
+    const query = { structuredQuery: { from: [{ collectionId: "reminderSettings", allDescendants: true }], where: { fieldFilter: { field: { fieldPath: "token" }, op: "IS_NOT_NULL", value: { nullValue: null } } }, limit: 500 } };
+    const response = await firestoreRequest(queryUrl, access, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(query) });
+    if (!response.ok) { console.error("Reminder query failed", response.status, (await response.text()).slice(0,500)); return; }
+    const rows = await response.json();
+    for (const row of rows) {
+      const document = row.document;
+      if (!document?.name) continue;
+      const data = decodeFields(document.fields || {});
+      if (typeof data.token !== "string" || typeof data.timezone !== "string") continue;
+      let parts;
+      try {
+        parts = new Intl.DateTimeFormat("en-GB", { timeZone: data.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date());
+      } catch { continue; }
+      const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
+      const time = `${p.hour}:${p.minute}`;
+      const dateKey = localDateKey(data.timezone);
+      const reminders = data.reminders || {};
+      for (const [key, copy] of Object.entries(REMINDER_COPY)) {
+        const item = reminders[key];
+        if (!item?.enabled || item.time !== time || data[`lastSent_${key}`] === dateKey) continue;
+        const sent = await sendReminder(env, access, data.token, copy[0], copy[1], `daylock-${key}-${dateKey}`);
+        if (!sent) continue;
+        const mask = `lastSent_${key}`;
+        await firestoreRequest(`https://firestore.googleapis.com/v1/${document.name}?updateMask.fieldPaths=${mask}`, access, {
+          method: "PATCH", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ fields: { [mask]: { stringValue: dateKey } } })
+        });
+      }
+    }
+  } catch (error) { console.error("Scheduled reminder run failed", error); }
+}
+
 export default {
+  async scheduled(controller, env, ctx) { ctx.waitUntil(runScheduledReminders(env)); },
   async fetch(request, env) {
     const url = new URL(request.url);
 
@@ -687,7 +776,7 @@ export default {
         return json({ ok: true, service: "daylock-schedule-api", configured: Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON) });
       }
       if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete" && url.pathname !== "/api/squad-challenges/progress") return json({ error: "Not found." }, 404);
+      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete" && url.pathname !== "/api/squad-challenges/progress" && url.pathname !== "/api/reminders/register") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
@@ -701,6 +790,7 @@ export default {
         if (url.pathname === "/api/quests/progress") return await advanceQuest(request, env, uid);
         if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);
         if (url.pathname === "/api/squad-challenges/progress") return await updateSquadChallengeProgress(request, env, uid);
+        if (url.pathname === "/api/reminders/register") return await registerReminders(request, env, uid);
         return await saveSchedule(request, env, uid);
       } catch (error) {
         console.warn("DAYLOCK request authentication failed", error);
