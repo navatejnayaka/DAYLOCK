@@ -327,6 +327,12 @@ function App() {
       if (displayName.trim()) {
         await updateProfile(credential.user, { displayName: displayName.trim() })
       }
+      try {
+        await sendEmailVerification(credential.user)
+        notify('Verification email sent. Check your inbox and spam folder.')
+      } catch {
+        notify('Account created. You can resend the verification email from Settings.')
+      }
       setCurrentUser(credential.user)
       setDemo(false)
       setEnteredApp(true)
