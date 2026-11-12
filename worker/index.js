@@ -700,7 +700,7 @@ async function registerReminders(request, env, uid) {
   const safe = {};
   for (const key of keys) {
     const item = reminders[key];
-    if (!item || typeof item.enabled !== "boolean" || typeof item.time !== "string" || !/^([01]\\d|2[0-3]):[0-5]\\d$/.test(item.time)) return json({ error: "Invalid reminder settings." }, 400);
+    if (!item || typeof item.enabled !== "boolean" || typeof item.time !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(item.time)) return json({ error: "Invalid reminder settings." }, 400);
     safe[key] = { enabled: item.enabled, time: item.time };
   }
   let serviceAccount;
