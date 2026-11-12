@@ -121,6 +121,12 @@ service cloud.firestore {
       }
     }
 
+    match /users/{userId}/habitDays/{dateKey} {
+      // Streak records are written only by the authenticated Worker.
+      allow get, list: if signedIn() && userId == uid();
+      allow create, update, delete: if false;
+    }
+
     match /users/{userId}/progress/{progressId} {
       allow get, list: if signedIn() && userId == uid();
       allow create, update, delete: if false;
