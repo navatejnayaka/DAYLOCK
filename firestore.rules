@@ -60,7 +60,12 @@ service cloud.firestore {
               && get(invitePath(request.resource.data.inviteCode)).data.active == true
               && exists(squadPath(squadId)))
           );
-        allow update: if false;
+        // Members can control only the name shown to other squad members.
+        allow update: if signedIn() && memberId == uid()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() >= 1
+          && request.resource.data.displayName.size() <= 40;
         allow delete: if signedIn() && memberId == uid() && resource.data.role == 'member';
       }
       match /challenges/{challengeId} {
@@ -166,6 +171,17 @@ service cloud.firestore {
         allow get, list: if signedIn() && userId == uid();
         allow create, update, delete: if false;
       }
+    }
+
+    match /users/{userId}/settings/{settingId} {
+      allow get: if signedIn() && userId == uid() && settingId == 'privacy';
+      allow list: if false;
+      allow create, update: if signedIn()
+        && userId == uid()
+        && settingId == 'privacy'
+        && request.resource.data.keys().hasOnly(['shareDisplayNameWithSquads', 'updatedAt'])
+        && request.resource.data.shareDisplayNameWithSquads is bool;
+      allow delete: if signedIn() && userId == uid() && settingId == 'privacy';
     }
 
     match /squadInvites/{inviteCode} {
