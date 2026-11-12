@@ -10,7 +10,7 @@ import {
   updateProfile,
 } from 'firebase/auth'
 import { auth, authPersistenceReady } from './firebase'
-import { collection, doc, getDoc, getDocs, serverTimestamp, writeBatch } from 'firebase/firestore'
+import { addDoc, collection, doc, getDoc, getDocs, runTransaction, serverTimestamp, writeBatch } from 'firebase/firestore'
 import { db } from './firebase'
 import {
   AlertTriangle, ArrowRight, ArrowUpRight, BarChart3, BookOpen, CalendarDays, Check, History,
@@ -24,6 +24,15 @@ type Screen = 'home' | 'day' | 'growth' | 'squad' | 'insights'
 type AuthMode = 'login' | 'signup' | 'reset'
 type TaskStatus = 'Not started' | 'In progress' | 'Completed' | 'Skipped'
 type Task = { id: number | string; title: string; category: string; start: string; end: string; status: TaskStatus; note?: string }
+type Quest = { id: string | number; title: string; category: string; progress: number; target: number; unit: string; reward?: number }
+
+function normalizeQuests(items: Array<Record<string, unknown>>): Quest[] {
+  return items.flatMap(item => {
+    if (typeof item.title !== 'string' || typeof item.category !== 'string' || typeof item.progress !== 'number' || typeof item.target !== 'number' || typeof item.unit !== 'string') return []
+    const target = Math.max(1, Math.min(1000, item.target))
+    return [{ id: String(item.id || ''), title: item.title.slice(0, 100), category: item.category, progress: Math.max(0, Math.min(target, item.progress)), target, unit: item.unit.slice(0, 30) }]
+  })
+}
 
 function localDateKey(offsetDays: number) {
   const date = new Date()
@@ -54,7 +63,7 @@ const zoneData = [
   { name: 'Adventure Isles', sub: 'Collect new experiences', icon: Mountain, tone: 'adventure', scene: 'isles', hint: 'Make room for a new story' },
   { name: 'Skill Forge', sub: 'Turn practice into mastery', icon: Star, tone: 'forge', scene: 'forge', hint: 'Shape potential through practice' },
 ]
-const demoQuests = [
+const demoQuests: Quest[] = [
   { id: 1, title: 'Learn one new word', category: 'Knowledge', progress: 0, target: 1, unit: 'word', reward: 20 },
   { id: 2, title: 'Start a conversation', category: 'Social', progress: 1, target: 3, unit: 'people', reward: 40 },
   { id: 3, title: 'Try a new recipe', category: 'Adventure', progress: 0, target: 1, unit: 'recipe', reward: 30 },
@@ -80,8 +89,15 @@ function App() {
   const [overrideReason, setOverrideReason] = useState('')
   const [showAuditHistory, setShowAuditHistory] = useState(false)
   const [auditHistory, setAuditHistory] = useState<Array<{id:string;reason:string;occurredAt:string;beforeTasks:Task[];afterTasks:Task[]}>>([])
-  const [quests, setQuests] = useState(demoQuests)
+  const [quests, setQuests] = useState<Quest[]>([])
   const [questFilter, setQuestFilter] = useState('All')
+  const [questsLoading, setQuestsLoading] = useState(false)
+  const [questSaving, setQuestSaving] = useState(false)
+  const [showQuestForm, setShowQuestForm] = useState(false)
+  const [questTitle, setQuestTitle] = useState('')
+  const [questCategory, setQuestCategory] = useState('Knowledge')
+  const [questTarget, setQuestTarget] = useState('1')
+  const [questUnit, setQuestUnit] = useState('step')
   const [showTaskForm, setShowTaskForm] = useState(false)
   const [taskTitle, setTaskTitle] = useState('')
   const [taskStart, setTaskStart] = useState('09:00')
@@ -183,6 +199,83 @@ function App() {
     const result = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(result.error || 'The schedule could not be saved.')
   }
+  useEffect(() => {
+    if (!currentUser || demo) return
+    let active = true
+    setQuests([])
+    setQuestsLoading(true)
+    getDocs(collection(db, 'users', currentUser.uid, 'quests'))
+      .then(snapshot => {
+        if (active) setQuests(normalizeQuests(snapshot.docs.map(item => ({ id: item.id, ...item.data() }))))
+      })
+      .catch(() => { if (active) notify('Could not load your Growth World quests. Please retry.') })
+      .finally(() => { if (active) setQuestsLoading(false) })
+    return () => { active = false }
+  }, [currentUser?.uid, demo])
+
+  const createQuest = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!questTitle.trim() || !currentUser || questSaving) return
+    const target = Number(questTarget)
+    const unit = questUnit.trim()
+    if (!Number.isInteger(target) || target < 1 || target > 1000) { notify('Choose a target from 1 to 1000.'); return }
+    if (!unit || unit.length > 30) { notify('Enter a short progress unit.'); return }
+    if (demo) {
+      setQuests(old => [...old, { id: `demo-${Date.now()}`, title: questTitle.trim(), category: questCategory, progress: 0, target, unit }])
+      setShowQuestForm(false)
+      setQuestTitle('')
+      notify('Quest added to the isolated demo.')
+      return
+    }
+    setQuestSaving(true)
+    try {
+      const ref = await addDoc(collection(db, 'users', currentUser.uid, 'quests'), {
+        title: questTitle.trim(), category: questCategory, progress: 0, target, unit,
+        createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+      })
+      setQuests(old => [...old, { id: ref.id, title: questTitle.trim(), category: questCategory, progress: 0, target, unit }])
+      setShowQuestForm(false)
+      setQuestTitle('')
+      setQuestTarget('1')
+      setQuestUnit('step')
+      notify('Quest saved to your Growth World.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not save this quest. Check Firestore rules.')
+    } finally {
+      setQuestSaving(false)
+    }
+  }
+
+  const updateQuest = async (id: string | number) => {
+    const quest = quests.find(item => String(item.id) === String(id))
+    if (!quest || quest.progress >= quest.target || questSaving) return
+    if (demo) {
+      setQuests(old => old.map(item => item.id === id ? { ...item, progress: Math.min(item.target, item.progress + 1) } : item))
+      return
+    }
+    if (!currentUser) return
+    setQuestSaving(true)
+    try {
+      const ref = doc(db, 'users', currentUser.uid, 'quests', String(id))
+      const next = await runTransaction(db, async transaction => {
+        const snapshot = await transaction.get(ref)
+        if (!snapshot.exists()) throw new Error('This quest no longer exists.')
+        const data = snapshot.data()
+        const previous = Number(data.progress || 0)
+        const target = Number(data.target || 1)
+        const progress = Math.min(target, previous + 1)
+        if (progress > previous) transaction.update(ref, { progress, updatedAt: serverTimestamp() })
+        return progress
+      })
+      setQuests(old => old.map(item => String(item.id) === String(id) ? { ...item, progress: next } : item))
+      if (next >= quest.target) notify('Quest completed! Nice work.')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Could not update quest progress.')
+    } finally {
+      setQuestSaving(false)
+    }
+  }
+
   const loadAuditHistory = async () => {
     if (!currentUser) return
     const dateKey = localDateKey(dayTarget === 'today' ? 0 : 1)
@@ -294,7 +387,6 @@ function App() {
     catch (error) { notify(error instanceof Error ? error.message : 'Could not save the status. Please retry.') }
     finally { setScheduleSaving(false) }
   }
-  const updateQuest = (id: number) => setQuests(old => old.map(quest => quest.id === id ? { ...quest, progress: Math.min(quest.target, quest.progress + 1) } : quest))
   const nav = [
     { id: 'home' as const, label: 'Home', icon: Compass },
     { id: 'day' as const, label: 'My Day', icon: CalendarDays },
@@ -327,7 +419,7 @@ function App() {
           <section className="world-strip"><div className="world-heading"><div><div className="eyebrow">A WORLD THAT GROWS WITH YOU</div><h2>Five realms. One evolving you.</h2><p>Explore a new path, practise a skill or celebrate a small win.</p></div><button className="text-button" onClick={() => goScreen('growth')}>Enter the world <ArrowRight size={15}/></button></div><div className="zone-grid">{zoneData.slice(0,3).map(zone => <ZoneCard key={zone.name} zone={zone} onClick={() => goScreen('growth')}/>)}</div></section>
         </div>}
         {screen === 'day' && <div className="content"><div className="page-heading"><div className="eyebrow">MAKE SPACE FOR WHAT MATTERS</div><h1>My Day</h1><p>Plan ahead, then focus on following through.</p></div><div className="day-toolbar"><div><span className="lock-bullet"><LockKeyhole size={15}/> {dayTarget === 'today' ? "Today's plan" : "Tomorrow's plan"}</span><small>{demo ? 'Isolated demo · changes are not saved.' : dayTarget === 'today' ? 'Sealed by the server. You can update task statuses, but not task details.' : 'Tomorrow is editable until midnight in your timezone. The server enforces the lock.'}</small><div className="day-tabs"><button className={dayTarget === 'today' ? 'day-tab active' : 'day-tab'} onClick={() => { setShowTaskForm(false); setDayTarget('today') }}>Today</button><button className={dayTarget === 'tomorrow' ? 'day-tab active' : 'day-tab'} onClick={() => { setShowTaskForm(false); setDayTarget('tomorrow') }}>Tomorrow</button></div></div><div className="toolbar-date">{new Intl.DateTimeFormat('en-IN',{day:'numeric',month:'short',year:'numeric'}).format(new Date(Date.now()+(dayTarget === 'today' ? 0 : 86400000)))}</div></div><div className="panel schedule-panel"><PanelTitle icon={<CalendarDays/>} title={dayTarget === 'today' ? "Today's timetable" : "Tomorrow's timetable"} action={demo || dayTarget === 'tomorrow' ? "Add a block" : undefined} onAction={() => setShowTaskForm(true)}/>{scheduleLoading ? <div className="empty-state"><b>Loading your timetable…</b></div> : tasks.length ? tasks.map(task => <TaskRow key={task.id} task={task} onStatus={updateStatus}/>) : <Empty icon={<CalendarDays/>} title="Nothing scheduled yet." detail="Start with one useful block. You can shape the rest later." action={demo || dayTarget === 'tomorrow' ? "Add your first block" : undefined} onAction={() => setShowTaskForm(true)} />}{scheduleSaving && <div className="panel-footnote">Saving your changes…</div>}</div>{!demo && dayTarget === 'today' && scheduleExists && <div className="emergency-actions"><button className="secondary" onClick={openEmergencyOverride}><AlertTriangle size={15}/> Emergency override</button><button className="text-button" onClick={loadAuditHistory}><History size={15}/> View audit history</button></div>}{showAuditHistory && <div className="panel audit-panel"><PanelTitle icon={<History/>} title="Emergency audit history" action="Close" onAction={() => setShowAuditHistory(false)}/>{auditHistory.length ? auditHistory.map(record => <article className="audit-entry" key={record.id}><div className="audit-entry-top"><b>Emergency amendment</b><time>{record.occurredAt ? new Intl.DateTimeFormat('en-IN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(record.occurredAt)) : 'Timestamp unavailable'}</time></div><p><strong>Reason:</strong> {record.reason}</p><details><summary>View preserved before/after snapshots</summary><div className="audit-snapshots"><div><b>Original</b>{record.beforeTasks.map(task => <span key={task.id}>{task.start}–{task.end} · {task.title}</span>)}</div><div><b>Amended</b>{record.afterTasks.map(task => <span key={task.id}>{task.start}–{task.end} · {task.title}</span>)}</div></div></details></article>) : <div className="empty-state"><b>No emergency amendments recorded.</b><p>Every approved emergency change will appear here.</p></div>}</div>}{showOverrideForm && <div className="modal-backdrop"><form className="task-form panel override-form" onSubmit={event => {event.preventDefault();void saveEmergencyOverride()}}><button type="button" className="close-form" onClick={() => setShowOverrideForm(false)}><X/></button><div className="eyebrow">SEALED SCHEDULE · AUDITED CHANGE</div><h2>Emergency override</h2><p className="override-explainer">Use this only when an important unexpected event requires a change. The original timetable will remain in the audit history.</p><label>Task to amend<select value={overrideTaskId} onChange={event => {const task=tasks.find(item=>String(item.id)===event.target.value);setOverrideTaskId(event.target.value);if(task){setOverrideTitle(task.title);setOverrideStart(task.start);setOverrideEnd(task.end)}}}>{tasks.map(task=><option key={task.id} value={String(task.id)}>{task.start} · {task.title}</option>)}</select></label><label>Updated task title<input value={overrideTitle} onChange={event=>setOverrideTitle(event.target.value)} required maxLength={100}/></label><div className="time-fields"><label>Starts<input type="time" value={overrideStart} onChange={event=>setOverrideStart(event.target.value)} required/></label><label>Ends<input type="time" value={overrideEnd} onChange={event=>setOverrideEnd(event.target.value)} required/></label></div><label>Reason for emergency change<textarea value={overrideReason} onChange={event=>setOverrideReason(event.target.value)} placeholder="Explain what changed and why this amendment is necessary…" minLength={10} maxLength={500} required rows={3}/></label><button className="primary" type="submit" disabled={scheduleSaving}>{scheduleSaving ? 'Recording amendment…' : 'Confirm emergency override'} <AlertTriangle size={15}/></button></form></div>}{showTaskForm && <div className="modal-backdrop"><form className="task-form panel" onSubmit={event => {event.preventDefault();void addTask()}}><button type="button" className="close-form" onClick={() => setShowTaskForm(false)}><X/></button><div className="eyebrow">{dayTarget.toUpperCase()} · NEW TIME BLOCK</div><h2>Add a block</h2><label>What will you work on?<input value={taskTitle} onChange={event => setTaskTitle(event.target.value)} placeholder="e.g. Study, project, reading" required maxLength={100}/></label><div className="time-fields"><label>Starts<input type="time" value={taskStart} onChange={event => setTaskStart(event.target.value)} required/></label><label>Ends<input type="time" value={taskEnd} onChange={event => setTaskEnd(event.target.value)} required/></label></div><button className="primary" type="submit" disabled={scheduleLoading || scheduleSaving}>{scheduleSaving ? 'Saving…' : 'Save time block'} <Plus size={16}/></button></form></div>}</div>}
-        {screen === 'growth' && <div className="content"><div className="page-heading"><div className="eyebrow">YOUR PERSONAL ADVENTURE</div><h1>Growth World</h1><p>Small quests. New skills. A life with more stories.</p></div><div className="world-banner"><div><div className="eyebrow">CHOOSE YOUR NEXT REALM</div><h2>Every path begins<br/>with one small step.</h2><p>Explore a realm and pick a challenge that feels right for you.</p></div><div className="world-sigil">✧</div></div><div className="zone-grid full">{zoneData.map(zone => <ZoneCard key={zone.name} zone={zone} onClick={() => notify(`${zone.name} selected · realm interactions are preview-only.`)}/>)}</div><div className="panel"><PanelTitle icon={<Flag/>} title="Quest board" action="Create quest" onAction={() => notify('Custom quest creation will be implemented with the Growth database.')}/><div className="filter-row">{['All','Knowledge','Social','Adventure','Wellness','Skill'].map(filter => <button className={questFilter===filter?'filter active':'filter'} key={filter} onClick={() => setQuestFilter(filter)}>{filter}</button>)}</div>{quests.filter(quest => questFilter==='All'||quest.category===questFilter).map(quest => <div className="quest-board-row" key={quest.id}><div className="quest-icon"><Flag size={17}/></div><div className="quest-text"><b>{quest.title}</b><span>{quest.category} · {quest.progress}/{quest.target} {quest.unit} · {quest.reward} sample XP</span></div><button className="small-action" onClick={() => updateQuest(quest.id)} disabled={quest.progress>=quest.target}>Add progress</button></div>)}</div></div>}
+        {screen === 'growth' && <div className="content"><div className="page-heading"><div className="eyebrow">YOUR PERSONAL ADVENTURE</div><h1>Growth World</h1><p>Small quests. New skills. A life with more stories.</p></div><div className="world-banner"><div><div className="eyebrow">CHOOSE YOUR NEXT REALM</div><h2>Every path begins<br/>with one small step.</h2><p>Explore a realm and pick a challenge that feels right for you.</p></div><div className="world-sigil">✧</div></div><div className="zone-grid full">{zoneData.map(zone => <ZoneCard key={zone.name} zone={zone} onClick={() => notify(`${zone.name} selected · realm progress will connect to quests in a later stage.`)}/>)}</div><div className="panel"><PanelTitle icon={<Flag/>} title="Quest board" action="Create quest" onAction={() => setShowQuestForm(true)}/><div className="filter-row">{['All','Knowledge','Social','Adventure','Wellness','Skill'].map(filter => <button className={questFilter===filter?'filter active':'filter'} key={filter} onClick={() => setQuestFilter(filter)}>{filter}</button>)}</div>{questsLoading ? <div className="empty-state"><b>Loading your quests…</b></div> : quests.filter(quest => questFilter==='All'||quest.category===questFilter).length ? quests.filter(quest => questFilter==='All'||quest.category===questFilter).map(quest => <div className="quest-board-row" key={quest.id}><div className="quest-icon"><Flag size={17}/></div><div className="quest-text"><b>{quest.title}</b><span>{quest.category} · {quest.progress}/{quest.target} {quest.unit}{quest.progress >= quest.target ? ' · Completed' : ''}</span><div className="progress-track"><i style={{width:`${quest.progress/quest.target*100}%`}}/></div></div><button className="small-action" onClick={() => void updateQuest(quest.id)} disabled={quest.progress>=quest.target || questSaving}>{quest.progress>=quest.target ? 'Completed' : 'Add progress'}</button></div>) : <Empty icon={<Flag/>} title="Your quest board is quiet." detail={demo ? "Create a sample quest to explore how progress works." : "Create your first personal quest. It will be saved to your account."} action="Create your first quest" onAction={() => setShowQuestForm(true)}/>}</div>{showQuestForm && <div className="modal-backdrop"><form className="task-form panel quest-form" onSubmit={createQuest}><button type="button" className="close-form" onClick={() => setShowQuestForm(false)}><X/></button><div className="eyebrow">GROWTH WORLD · NEW QUEST</div><h2>Create a quest</h2><label>Quest title<input value={questTitle} onChange={event=>setQuestTitle(event.target.value)} placeholder="e.g. Practise guitar" maxLength={100} required/></label><label>Realm / category<select value={questCategory} onChange={event=>setQuestCategory(event.target.value)}><option>Knowledge</option><option>Social</option><option>Adventure</option><option>Wellness</option><option>Skill</option></select></label><div className="time-fields"><label>Target count<input type="number" min="1" max="1000" value={questTarget} onChange={event=>setQuestTarget(event.target.value)} required/></label><label>Unit<input value={questUnit} onChange={event=>setQuestUnit(event.target.value)} placeholder="e.g. pages, sessions" maxLength={30} required/></label></div><p className="override-explainer">Progress is saved to your account. XP and streak rewards will be connected in a later milestone, so no points are claimed yet.</p><button className="primary" type="submit" disabled={questSaving}>{questSaving ? 'Saving quest…' : 'Save quest'} <Plus size={16}/></button></form></div>}</div>}
         {screen === 'squad' && currentUser && <SquadCenter user={currentUser}/>} 
         {screen === 'insights' && <div className="content"><div className="page-heading"><div className="eyebrow">LOOK HOW FAR YOU'VE COME</div><h1>Insights</h1><p>Progress is personal. Notice patterns, not perfection.</p></div><div className="stat-grid"><Stat icon={<Target/>} label="Tasks completed" value={`${completed} sample`} sub="Demo activity only"/><Stat icon={<Flame/>} label="Current streak" value="4 sample days" sub="Not a real account streak"/><Stat icon={<Trophy/>} label="Journey XP" value="840 sample XP" sub="Not a live reward balance"/></div><div className="panel chart-panel"><PanelTitle icon={<BarChart3/>} title="A sample weekly rhythm"/><div className="bars">{[35,58,42,76,62,24,48].map((value,index)=><div className="bar-column" key={index}><div className="bar-track"><i style={{height:`${value}%`}}/></div><small>{['M','T','W','T','F','S','S'][index]}</small></div>)}</div><div className="panel-footnote">Illustrative chart · connected analytics are not implemented yet</div></div></div>}
       </main>
@@ -545,6 +637,6 @@ function Stat({icon,label,value,sub}:{icon:ReactNode;label:string;value:string;s
 function PanelTitle({icon,title,action,onAction}:{icon:ReactNode;title:string;action?:string;onAction?:()=>void}) { return <div className="panel-title"><div>{icon}<h3>{title}</h3></div>{action&&<button className="text-button" onClick={onAction}>{action} <ArrowRight size={14}/></button>}</div> }
 function Empty({icon,title,detail,action,onAction}:{icon:ReactNode;title:string;detail:string;action?:string;onAction?:()=>void}) { return <div className="empty-state"><div className="empty-icon">{icon}</div><b>{title}</b><p>{detail}</p>{action&&<button className="secondary small" onClick={onAction}>{action} <ArrowRight size={14}/></button>}</div> }
 function TaskRow({task,onStatus}:{task:Task;onStatus:(id:number | string,status:TaskStatus)=>void}) { return <div className="task-row"><div className="task-time">{task.start}<span>—</span>{task.end}</div><div className="task-main"><b>{task.title}</b><span>{task.category}{task.note? ` · ${task.note}`:''}</span></div><select value={task.status} onChange={event => onStatus(task.id,event.target.value as TaskStatus)}><option>Not started</option><option>In progress</option><option>Completed</option><option>Skipped</option></select></div> }
-function QuestLine({quest}:{quest:typeof demoQuests[number]}) { return <div className="quest-line"><div className="quest-icon"><Sparkles size={16}/></div><div className="quest-text"><b>{quest.title}</b><span>{quest.category} · {quest.progress}/{quest.target} {quest.unit}</span><div className="progress-track"><i style={{width:`${quest.progress/quest.target*100}%`}}/></div></div></div> }
+function QuestLine({quest}:{quest:Quest}) { return <div className="quest-line"><div className="quest-icon"><Sparkles size={16}/></div><div className="quest-text"><b>{quest.title}</b><span>{quest.category} · {quest.progress}/{quest.target} {quest.unit}</span><div className="progress-track"><i style={{width:`${quest.progress/quest.target*100}%`}}/></div></div></div> }
 function ZoneCard({zone,onClick}:{zone:typeof zoneData[number];onClick:()=>void}) { const Icon=zone.icon;return <button className={`zone-card ${zone.tone}`} onClick={onClick}><div className={`zone-art scene-${zone.scene}`}><div className="zone-glow"/><Icon size={29}/><span className="zone-spark">✦</span></div><div className="zone-info"><b>{zone.name}</b><span>{zone.sub}</span><div className="progress-track"><i style={{width:'0%'}}/></div><small>{zone.hint}</small></div><ChevronRight size={16}/></button> }
 export default App
