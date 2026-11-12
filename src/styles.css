@@ -110,3 +110,5 @@
 .reminder-toggle input{width:18px;height:18px;accent-color:var(--lime)}
 .reminder-setting>input[type=time]{width:118px;min-width:118px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:#0a140e;color:var(--cream)}
 @media(max-width:520px){.reminder-setting{align-items:flex-start}.reminder-setting>input[type=time]{width:105px;min-width:105px}}
+
+.profile-settings{display:grid;gap:4px;margin:4px 0 18px}.profile-settings label{display:grid;gap:7px;margin:8px 0;color:#c8d5c1;font-size:11px}.profile-settings input{width:100%;border:1px solid #334b36;background:#09140d;color:#edf5e8;padding:12px;border-radius:9px;outline:none}.profile-settings input:focus{border-color:#9abf5d}.profile-settings input:disabled{opacity:.7;cursor:not-allowed}.profile-settings button{justify-self:start;margin-top:8px}.settings-divider{height:1px;background:var(--line);margin:20px 0}
