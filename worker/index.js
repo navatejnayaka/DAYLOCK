@@ -737,13 +737,14 @@ async function runScheduledReminders(env) {
     const queryUrl = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents:runQuery`;
     const query = { structuredQuery: { from: [{ collectionId: "reminderSettings", allDescendants: true }], limit: 500 } };
     const response = await firestoreRequest(queryUrl, access, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(query) });
-    if (!response.ok) { console.error("Reminder query failed", response.status, (await response.text()).slice(0,500)); return; }
+    if (!response.ok) { console.error("DAYLOCK_REMINDERS_QUERY_FAILED", response.status, (await response.text()).slice(0,500)); return; }
     const rows = await response.json();
+    console.log("DAYLOCK_REMINDERS_QUERY_OK", { documents: rows.filter(row => row.document).length });
     for (const row of rows) {
       const document = row.document;
       if (!document?.name) continue;
       const data = decodeFields(document.fields || {});
-      if (typeof data.token !== "string" || typeof data.timezone !== "string") continue;
+      if (typeof data.token !== "string" || typeof data.timezone !== "string") { console.log("DAYLOCK_REMINDER_DOC_SKIPPED", { reason: "missing-token-or-timezone" }); continue; }
       let parts;
       try {
         parts = new Intl.DateTimeFormat("en-GB", { timeZone: data.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date());
@@ -751,12 +752,15 @@ async function runScheduledReminders(env) {
       const p = Object.fromEntries(parts.map(x => [x.type, x.value]));
       const time = `${p.hour}:${p.minute}`;
       const dateKey = localDateKey(data.timezone);
+      console.log("DAYLOCK_REMINDER_CHECK", { uid: data.uid || "unknown", timezone: data.timezone, localTime: time, enabled: Object.entries(data.reminders || {}).filter(([, item]) => item?.enabled).map(([key]) => key) });
       const reminders = data.reminders || {};
       for (const [key, copy] of Object.entries(REMINDER_COPY)) {
         const item = reminders[key];
         if (!item?.enabled || item.time !== time || data[`lastSent_${key}`] === dateKey) continue;
+        console.log("DAYLOCK_REMINDER_MATCH", { uid: data.uid || "unknown", reminder: key, scheduledTime: item.time });
         const sent = await sendReminder(env, fcmAccess, data.token, copy[0], copy[1], `daylock-${key}-${dateKey}`);
-        if (!sent) continue;
+        if (!sent) { console.error("DAYLOCK_REMINDER_SEND_FAILED", { uid: data.uid || "unknown", reminder: key }); continue; }
+        console.log("DAYLOCK_REMINDER_SENT", { uid: data.uid || "unknown", reminder: key });
         const mask = `lastSent_${key}`;
         await firestoreRequest(`https://firestore.googleapis.com/v1/${document.name}?updateMask.fieldPaths=${mask}`, access, {
           method: "PATCH", headers: { "content-type": "application/json" },
