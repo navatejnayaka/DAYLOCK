@@ -699,7 +699,8 @@ export default {
         const uid = await verifyFirebaseIdToken(match[1]);
         if (url.pathname === "/api/schedules/override") return await emergencyOverride(request, env, uid);
         if (url.pathname === "/api/quests/progress") return await advanceQuest(request, env, uid);
-        if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);\n        if (url.pathname === "/api/squad-challenges/progress") return await updateSquadChallengeProgress(request, env, uid);
+        if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);
+        if (url.pathname === "/api/squad-challenges/progress") return await updateSquadChallengeProgress(request, env, uid);
         return await saveSchedule(request, env, uid);
       } catch (error) {
         console.warn("DAYLOCK request authentication failed", error);
