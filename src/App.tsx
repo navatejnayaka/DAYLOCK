@@ -141,6 +141,7 @@ function App() {
   const [emailChangeInput, setEmailChangeInput] = useState('')
   const [emailChangePassword, setEmailChangePassword] = useState('')
   const [emailChanging, setEmailChanging] = useState(false)
+  const [accountRefreshTick, setAccountRefreshTick] = useState(0)
   const [exportingData, setExportingData] = useState(false)
   const [privacyShareDisplayName, setPrivacyShareDisplayName] = useState(true)
   const [privacySaving, setPrivacySaving] = useState(false)
@@ -229,6 +230,7 @@ function App() {
       await currentUser.reload()
       const verified = Boolean(auth.currentUser?.emailVerified)
       setEmailVerified(verified)
+      setAccountRefreshTick(value => value + 1)
       notify(verified ? 'Email address verified successfully.' : 'Email is not verified yet. Open the link in your inbox first.')
     } catch (error) {
       notify(error instanceof Error ? error.message : 'Could not refresh verification status.')
@@ -289,7 +291,7 @@ function App() {
     setExportingData(true)
     try {
       const uid = currentUser.uid
-      const [scheduleSnap, habitSnap, questSnap, progressSnap, xpSnap, habitDaySnap, squadSnap, reminderSnap, privacySnap] = await Promise.all([
+      const [scheduleSnap, habitSnap, questSnap, progressSnap, xpSnap, habitDaySnap, squadSnap, privacySnap] = await Promise.all([
         getDocs(collection(db, 'users', uid, 'schedules')),
         getDocs(collection(db, 'users', uid, 'habits')),
         getDocs(collection(db, 'users', uid, 'quests')),
@@ -1069,7 +1071,6 @@ function App() {
           <button type="button" className="secondary" onClick={() => void changeAccountPassword()} disabled={passwordSaving || !currentPasswordInput || newPasswordInput.length < 8 || !confirmNewPasswordInput}>{passwordSaving ? "Updating…" : "Update password"}</button>
         </div>
         <div className="settings-divider"/>
-        <div className="settings-divider"/>
         <div className="eyebrow">PRIVACY CONTROLS</div><h2>Manage your data</h2>
         <div className="privacy-control-row"><div><b>Show my display name in Squads</b><p>When off, squad members see “DAYLOCK Member” instead of your profile name. Your timetables, notes and email remain private.</p></div><label className="privacy-switch"><input type="checkbox" checked={privacyShareDisplayName} disabled={privacySaving || !currentUser} onChange={event => void savePrivacyPreference(event.target.checked)}/><span>{privacySaving ? 'Saving…' : privacyShareDisplayName ? 'On' : 'Off'}</span></label></div>
         <div className="privacy-control-row"><div><b>Download a copy of my data</b><p>Export your timetables and audit history, habits, quests, XP activity, squad memberships and reminder preferences as JSON. Push tokens and passwords are excluded.</p></div><button type="button" className="secondary" onClick={() => void exportAccountData()} disabled={exportingData || !currentUser}>{exportingData ? 'Preparing…' : 'Export my data'}</button></div>
@@ -1147,6 +1148,7 @@ function SquadCenter({ user, shareDisplayName }: { user: User; shareDisplayName:
     finally{setLoading(false)}
   }
   useEffect(()=>{void loadSquads()},[user.uid])
+  useEffect(()=>{setMembers(roster=>roster.map(member=>member.uid===user.uid?{...member,displayName:visibleDisplayName}:member))},[user.uid,visibleDisplayName])
   const loadChallenges=async(id:string, roster:SquadMember[])=>{
     const snap=await getDocs(collection(db,'squads',id,'challenges'))
     const docs=await Promise.all(snap.docs.map(async d=>{
