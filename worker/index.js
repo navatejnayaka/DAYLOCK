@@ -412,10 +412,10 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api/")) {
-      if (request.method !== "POST" && url.pathname !== "/api/health") {
-        return json({ error: "Method not allowed." }, 405);
+      if (url.pathname === "/api/health" && request.method === "GET") {
+        return json({ ok: true, service: "daylock-schedule-api", configured: Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON) });
       }
-      if (url.pathname === "/api/health" && request.method === "POST") return json({ ok: true });
+      if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
       if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
