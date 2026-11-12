@@ -644,6 +644,40 @@ async function completeHabit(request, env, uid) {
     return json({ error: "The habit service could not complete this update. Please retry." }, 502);
   }
 }
+
+async function updateSquadChallengeProgress(request, env, uid) {
+  if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The squad challenge service is not configured." }, 503);
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "Request body must be valid JSON." }, 400); }
+  const { squadId, challengeId, amount } = body || {};
+  if (typeof squadId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(squadId) || typeof challengeId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(challengeId) || !Number.isInteger(amount) || amount < 1 || amount > 100) return json({ error: "Choose a valid challenge and progress amount (1–100)." }, 400);
+  let serviceAccount;
+  try { serviceAccount = JSON.parse(env.FIREBASE_SERVICE_ACCOUNT_JSON); if (serviceAccount.project_id !== PROJECT_ID || !serviceAccount.client_email || !serviceAccount.private_key) return json({ error: "The squad service credential is not configured correctly." }, 503); }
+  catch { return json({ error: "The squad service credential is not valid JSON." }, 503); }
+  try {
+    const token = await getGoogleAccessToken(serviceAccount), base = `projects/${PROJECT_ID}/databases/(default)/documents`;
+    const memberName = `${base}/squads/${squadId}/members/${uid}`, challengeName = `${base}/squads/${squadId}/challenges/${challengeId}`, progressName = `${challengeName}/progress/${uid}`;
+    const get = name => firestoreRequest(`https://firestore.googleapis.com/v1/${name}`, token);
+    const [memberRes, challengeRes, progressRes] = await Promise.all([get(memberName), get(challengeName), get(progressName)]);
+    if (memberRes.status === 404) return json({ error: "You are not a member of this squad." }, 403);
+    if (!memberRes.ok) return json({ error: "Could not verify squad membership." }, 502);
+    if (challengeRes.status === 404) return json({ error: "This challenge no longer exists." }, 404);
+    if (!challengeRes.ok) return json({ error: "Could not load this challenge." }, 502);
+    if (!progressRes.ok && progressRes.status !== 404) return json({ error: "Could not load your challenge progress." }, 502);
+    const challenge = decodeFields((await challengeRes.json()).fields || {});
+    if (challenge.status !== "active") return json({ error: "This challenge is not active." }, 409);
+    const target = Number(challenge.target || 0);
+    if (!Number.isInteger(target) || target < 1 || target > 100000) return json({ error: "This challenge has an invalid target." }, 409);
+    const previous = progressRes.ok ? await progressRes.json() : null, current = previous ? decodeFields(previous.fields || {}) : {};
+    const next = Math.min(target, Math.max(0, Number(current.progress || 0)) + amount), timestamp = new Date().toISOString();
+    const member = decodeFields((await memberRes.json()).fields || {});
+    const write = { update: { name: progressName, fields: encodeFields({ uid, progress: next, updatedAt: timestamp, displayName: String(member.displayName || "Squad member").slice(0,40) }) }, updateMask: { fieldPaths: ["uid","progress","updatedAt","displayName"] }, currentDocument: previous ? { updateTime: previous.updateTime } : { exists: false } };
+    const commit = await firestoreRequest(`https://firestore.googleapis.com/v1/${base}:commit`, token, { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify({writes:[write]}) });
+    if (!commit.ok) return json({ error: commit.status===409||commit.status===400 ? "Progress changed at the same time. Refresh and retry." : "Could not save challenge progress." }, commit.status===409||commit.status===400?409:502);
+    return json({ok:true,progress:next,target,completed:next>=target});
+  } catch(error) { console.error("DAYLOCK squad challenge progress failed",error); return json({error:"The squad challenge service could not complete this update."},502); }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -653,7 +687,7 @@ export default {
         return json({ ok: true, service: "daylock-schedule-api", configured: Boolean(env.FIREBASE_SERVICE_ACCOUNT_JSON) });
       }
       if (request.method !== "POST") return json({ error: "Method not allowed." }, 405);
-      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete") return json({ error: "Not found." }, 404);
+      if (url.pathname !== "/api/schedules/save" && url.pathname !== "/api/schedules/override" && url.pathname !== "/api/quests/progress" && url.pathname !== "/api/habits/complete" && url.pathname !== "/api/squad-challenges/progress") return json({ error: "Not found." }, 404);
 
       const origin = request.headers.get("origin");
       if (origin && origin !== url.origin) return json({ error: "Cross-origin requests are not allowed." }, 403);
@@ -665,7 +699,7 @@ export default {
         const uid = await verifyFirebaseIdToken(match[1]);
         if (url.pathname === "/api/schedules/override") return await emergencyOverride(request, env, uid);
         if (url.pathname === "/api/quests/progress") return await advanceQuest(request, env, uid);
-        if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);
+        if (url.pathname === "/api/habits/complete") return await completeHabit(request, env, uid);\n        if (url.pathname === "/api/squad-challenges/progress") return await updateSquadChallengeProgress(request, env, uid);
         return await saveSchedule(request, env, uid);
       } catch (error) {
         console.warn("DAYLOCK request authentication failed", error);
