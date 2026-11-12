@@ -752,6 +752,9 @@ async function deleteFirestoreTree(access, documentName, counter, depth = 0) {
 }
 
 async function deleteAccountData(request, env, uid) {
+  let confirmation;
+  try { confirmation = (await request.json())?.confirmation; } catch { return json({ error: "Deletion confirmation is required." }, 400); }
+  if (confirmation !== "DELETE") return json({ error: "Type DELETE to confirm account deletion." }, 400);
   if (!env.FIREBASE_SERVICE_ACCOUNT_JSON) return json({ error: "The secure account deletion service is not configured." }, 503);
   let serviceAccount;
   try {
