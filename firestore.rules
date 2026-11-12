@@ -63,21 +63,6 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if signedIn() && memberId == uid() && resource.data.role == 'member';
       }
-    }
-
-    match /users/{userId}/squads/{squadId} {
-      allow get, list: if signedIn() && userId == uid();
-      allow create: if signedIn()
-        && userId == uid()
-        && request.resource.data.keys().hasOnly(['squadId', 'name', 'role', 'joinedAt'])
-        && request.resource.data.squadId == squadId
-        && request.resource.data.name is string
-        && request.resource.data.role in ['owner', 'member']
-        && getAfter(memberPath(squadId, uid())).data.uid == uid();
-      allow update, delete: if false;
-    }
-
-
       match /challenges/{challengeId} {
         allow get, list: if isMember(squadId);
         allow create: if isOwner(squadId)
@@ -93,6 +78,20 @@ service cloud.firestore {
           allow create, update, delete: if false;
         }
       }
+    }
+
+    match /users/{userId}/squads/{squadId} {
+      allow get, list: if signedIn() && userId == uid();
+      allow create: if signedIn()
+        && userId == uid()
+        && request.resource.data.keys().hasOnly(['squadId', 'name', 'role', 'joinedAt'])
+        && request.resource.data.squadId == squadId
+        && request.resource.data.name is string
+        && request.resource.data.role in ['owner', 'member']
+        && getAfter(memberPath(squadId, uid())).data.uid == uid();
+      allow update, delete: if false;
+    }
+
 
     match /users/{userId}/quests/{questId} {
       allow get, list: if signedIn() && userId == uid();
